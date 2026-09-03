@@ -262,6 +262,16 @@
       "section": "message"
     },
     {
+      "arg": {
+        "expected": "New text"
+      },
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "message_occurrences",
+      "program_digest": "b1263ac9a4f8",
+      "section": "message"
+    },
+    {
       "call": "send_message",
       "kind": "evaluate",
       "operation": "click_send_button",
@@ -270,12 +280,13 @@
     },
     {
       "arg": {
-        "expected": "New text"
+        "expected": "New text",
+        "previous": 0
       },
       "call": "send_message",
       "kind": "wait_for_function",
-      "operation": "body_marker",
-      "program_digest": "67e47cd98bf4",
+      "operation": "message_occurrences_increased",
+      "program_digest": "2e7498d0e493",
       "section": "message",
       "timeout_ms": null
     }
