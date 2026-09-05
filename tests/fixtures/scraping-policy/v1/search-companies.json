@@ -31,6 +31,12 @@
     },
     {
       "call": "search_companies",
+      "description": "goto https://www.linkedin.com/search/results/companies/?keywords=engine",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "search_companies",
       "extra": {
         "target_url": "https://www.linkedin.com/search/results/companies/?keywords=engine",
         "wait_until": "domcontentloaded"
@@ -97,6 +103,9 @@
     "section_names": [
       "search_results"
     ],
+    "sections": {
+      "search_results": "Result content"
+    },
     "url": "https://www.linkedin.com/search/results/companies/?keywords=engine"
   },
   "scenario": "search_companies__baseline",
