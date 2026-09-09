@@ -3,8 +3,7 @@
     "arguments": {
       "confirm_send": true,
       "linkedin_username": "ada-lovelace",
-      "message": "   ",
-      "profile_urn": "ACoAA-policy"
+      "message_case": "blank"
     },
     "method": "send_message"
   },
@@ -12,10 +11,11 @@
   "result": {
     "message": "Message must contain non-whitespace characters.",
     "recipient_selected": false,
+    "retry_safe": true,
     "sent": false,
-    "status": "message_unavailable",
+    "status": "invalid_message",
     "url": "https://www.linkedin.com/in/ada-lovelace/"
   },
-  "scenario": "send_message__blank_message",
+  "scenario": "send_message__invalid_blank",
   "schema_version": 1
 }
