@@ -35,6 +35,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
     mock.get_unread_conversations = AsyncMock(return_value=scrape_result)
+    mock.get_all_conversations = AsyncMock(return_value=scrape_result)
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
@@ -919,6 +920,90 @@ class TestMessagingTools:
         assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
         mock_extractor.get_inbox.assert_awaited_once_with(limit=20)
 
+    async def test_get_all_conversations_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/",
+            "sections": {"all_conversations": "[unread] Ana Dias | Sep 7 | Hi"},
+            "all_conversations": [
+                {
+                    "name": "Ana Dias",
+                    "timestamp": "Sep 7",
+                    "snippet": "Hi",
+                    "unread": True,
+                },
+                {
+                    "name": "Rui Costa",
+                    "timestamp": "May 16",
+                    "snippet": "Thanks",
+                    "unread": False,
+                },
+            ],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_all_conversations")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert [c["unread"] for c in result["all_conversations"]] == [True, False]
+        # No limit: the point of the tool is the whole inventory.
+        mock_extractor.get_all_conversations.assert_awaited_once_with()
+
+    async def test_get_all_conversations_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.get_all_conversations = AsyncMock(
+            side_effect=SessionExpiredError()
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_all_conversations")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(mock_context, extractor=mock_extractor)
+
+    async def test_get_inbox_does_not_claim_read_only(self):
+        """get_inbox click-visits rows, so it must not be replayable.
+
+        `daemon_auth.a_repeat_could_change_something` reads `readOnlyHint` to
+        decide whether a failed call may be re-run automatically, after a sign-in
+        (`daemon_auth.py`) or after a replacement owner is elected
+        (`daemon_proxy.py`). Clicking a row marks it read, so a silent replay
+        would mark more rows read — which is why this annotation is a correctness
+        guard and not documentation.
+        """
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        for name in ("get_inbox", "get_conversation", "search_conversations"):
+            tool = await mcp.get_tool(name)
+            read_only = tool.annotations and tool.annotations.readOnlyHint
+            assert not read_only, f"{name} click-visits rows; it is not read-only"
+
+    async def test_no_click_tools_claim_read_only(self):
+        """The two readers that never click may promise it, and must."""
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        for name in ("get_unread_conversations", "get_all_conversations"):
+            tool = await mcp.get_tool(name)
+            assert tool.annotations is not None
+            assert tool.annotations.readOnlyHint is True, name
+
     async def test_get_unread_conversations_success(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/messaging/?filter=unread",
@@ -1778,6 +1863,7 @@ class TestToolTimeouts:
             "get_saved_jobs",
             "get_inbox",
             "get_unread_conversations",
+            "get_all_conversations",
             "get_conversation",
             "search_conversations",
             "send_message",
@@ -1812,6 +1898,7 @@ class TestToolTimeouts:
             "get_saved_jobs",
             "get_inbox",
             "get_unread_conversations",
+            "get_all_conversations",
             "get_conversation",
             "search_conversations",
             "send_message",

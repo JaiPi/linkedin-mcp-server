@@ -1,6 +1,6 @@
 """Browser-DOM tests for the unread conversation row reader and list scroll.
 
-The unit suite mocks ``page.evaluate``, so neither ``_UNREAD_ROWS_JS`` nor the
+The unit suite mocks ``page.evaluate``, so neither ``_CONVERSATION_ROWS_JS`` nor the
 scrolling JS in ``scroll_conversation_list`` ever executes there. These tests run
 both against a synthetic conversation list in headless chromium, where each
 scroll appends the next batch after a delay. That delay is the point: it stands
@@ -26,7 +26,10 @@ import pytest
 from patchright.async_api import async_playwright
 
 from linkedin_mcp_server.core.utils import scroll_conversation_list
-from linkedin_mcp_server.scraping.extractor import _UNREAD_ROWS_JS
+from linkedin_mcp_server.scraping.extractor import (
+    _CONVERSATION_ROWS_JS,
+    _UNREAD_CARD_CLASS,
+)
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
 #: worker so browser startups cannot compete with the DOM cases' wall-clock
@@ -37,7 +40,7 @@ pytestmark = [
 ]
 
 
-def row(i: int, *, skeleton: bool = False) -> str:
+def row(i: int, *, skeleton: bool = False, unread: bool = False) -> str:
     """One conversation row; a skeleton is mounted but not yet hydrated."""
     if skeleton:
         # What LinkedIn mounts before the content arrives: the list item and its
@@ -46,9 +49,14 @@ def row(i: int, *, skeleton: bool = False) -> str:
             '<li class="ember-view msg-conversation-listitem">'
             '<div class="msg-conversation-card"></div></li>'
         )
+    # The live modifier sits on a wrapper inside the row alongside other
+    # classes, which is why the JS matches it as a substring.
+    card = "msg-conversation-card"
+    if unread:
+        card = f"msg-conversation-card__{_UNREAD_CARD_CLASS} {card}"
     return (
         '<li class="ember-view msg-conversation-listitem">'
-        '<div class="msg-conversation-card">'
+        f'<div class="{card}">'
         "<label"
         f' aria-label="Select conversation with Person {i}"></label>'
         f"<time>Sep {i}</time>"
@@ -125,7 +133,9 @@ def conversation_list(
 
 async def read_rows(page) -> list[dict[str, str]]:
     """What `get_unread_conversations` reads, return shape alike."""
-    return await page.evaluate(_UNREAD_ROWS_JS)
+    return await page.evaluate(
+        _CONVERSATION_ROWS_JS, {"unreadClass": _UNREAD_CARD_CLASS}
+    )
 
 
 def _chrome_path() -> str | None:
@@ -168,7 +178,24 @@ async def test_reads_name_time_and_snippet(page):
         "ariaLabel": "Select conversation with Person 0",
         "timestamp": "Sep 0",
         "snippet": "Hello 0",
+        "unread": False,
     }
+
+
+async def test_reports_the_unread_flag_per_row(page):
+    """The flag must discriminate, not just be present.
+
+    A reader that marked every row unread, or none, would satisfy a test that
+    only checked the field exists.
+    """
+    marked = row(0, unread=True) + row(1) + row(2, unread=True)
+    await page.set_content(
+        f"<!doctype html><html><body><main><ul>{marked}</ul></main></body></html>"
+    )
+
+    rows = await read_rows(page)
+
+    assert [r["unread"] for r in rows] == [True, False, True]
 
 
 async def test_skips_unhydrated_skeleton_rows(page):

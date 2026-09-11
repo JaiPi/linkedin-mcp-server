@@ -100,6 +100,14 @@
       "description": "List recent conversations from the LinkedIn messaging inbox"
     },
     {
+      "name": "get_unread_conversations",
+      "description": "List every unread conversation without marking any of them read"
+    },
+    {
+      "name": "get_all_conversations",
+      "description": "List every conversation, read and unread, without marking any read"
+    },
+    {
       "name": "get_conversation",
       "description": "Read a specific messaging conversation by thread ID or LinkedIn username"
     },

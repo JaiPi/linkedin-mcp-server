@@ -144,7 +144,8 @@ Optional additional keys:
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
-- `unread_conversations: [{name, timestamp, snippet}, ...]` (get_unread_conversations only) — in inbox order. No thread id: the sidebar carries none in the DOM and recovering one means click-visiting the row, which marks it read and is what that tool exists to avoid.
+- `unread_conversations: [{name, timestamp, snippet, unread}, ...]` (get_unread_conversations only) — in inbox order. No thread id: the sidebar carries none in the DOM and recovering one means click-visiting the row, which marks it read and is what that tool exists to avoid.
+- `all_conversations: [{name, timestamp, snippet, unread}, ...]` (get_all_conversations only) — every conversation read and unread, same no-click read and same absence of thread ids. `unread` is the conversation card's own state and is **advisory**: measured on a 190-row inbox it flagged 13 where `?filter=unread` reported 30, so `get_unread_conversations` is the authoritative unread set.
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
 ## Tests

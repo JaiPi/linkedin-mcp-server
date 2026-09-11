@@ -37,7 +37,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _MESSAGE_CONFIRMATION_PREPARE_JS,
     _MESSAGE_CONFIRMATION_READY_JS,
     _RATE_LIMITED_MSG,
-    _UNREAD_ROWS_JS,
+    _CONVERSATION_ROWS_JS,
     _build_feed_references,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
@@ -7869,6 +7869,89 @@ class TestScrapePersonProfileUrn:
         assert "profile_urn" not in result
 
 
+class TestGetAllConversations:
+    """get_all_conversations inventories the inbox without clicking."""
+
+    async def test_reads_the_unfiltered_inbox(self, mock_page):
+        """The URL is the plain inbox, not the unread filter."""
+        extractor = LinkedInExtractor(mock_page)
+        rows = [
+            {
+                "ariaLabel": "Select conversation with Ana Dias",
+                "timestamp": "Sep 7",
+                "snippet": "Ana: are you free?",
+                "unread": True,
+            },
+        ]
+        with contextlib.ExitStack() as stack:
+            for patcher in TestGetUnreadConversations._patches(extractor, rows):
+                stack.enter_context(patcher)
+            result = await extractor.get_all_conversations()
+
+        assert result["url"] == "https://www.linkedin.com/messaging/"
+        assert "all_conversations" in result["sections"]
+
+    async def test_unread_flag_discriminates(self, mock_page):
+        """Read and unread rows come back together, each labelled.
+
+        This is what the filtered view cannot give: it holds only unread threads,
+        so it cannot say what sits between them.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        rows = [
+            {
+                "ariaLabel": "Select conversation with Unread Person",
+                "timestamp": "Sep 7",
+                "snippet": "new",
+                "unread": True,
+            },
+            {
+                "ariaLabel": "Select conversation with Read Person",
+                "timestamp": "Sep 6",
+                "snippet": "old",
+                "unread": False,
+            },
+        ]
+        with contextlib.ExitStack() as stack:
+            for patcher in TestGetUnreadConversations._patches(extractor, rows):
+                stack.enter_context(patcher)
+            result = await extractor.get_all_conversations()
+
+        assert [c["unread"] for c in result["all_conversations"]] == [True, False]
+        # The text blob marks unread rows so a reader of the section alone can
+        # still tell them apart.
+        text = result["sections"]["all_conversations"]
+        assert "[unread] Unread Person" in text
+        assert "[unread] Read Person" not in text
+
+    async def test_never_clicks_a_row(self, mock_page):
+        """Same guarantee as the unread reader, over far more rows."""
+        extractor = LinkedInExtractor(mock_page)
+        rows = [
+            {
+                "ariaLabel": "Select conversation with Ana Dias",
+                "timestamp": "Sep 7",
+                "snippet": "hi",
+                "unread": False,
+            }
+        ]
+        with contextlib.ExitStack() as stack:
+            for patcher in TestGetUnreadConversations._patches(extractor, rows):
+                stack.enter_context(patcher)
+            thread_refs = stack.enter_context(
+                patch.object(
+                    extractor,
+                    "_extract_conversation_thread_refs",
+                    new_callable=AsyncMock,
+                    return_value=[],
+                )
+            )
+            await extractor.get_all_conversations()
+
+        thread_refs.assert_not_awaited()
+        mock_page.click.assert_not_called()
+
+
 class TestGetUnreadConversations:
     """get_unread_conversations reads the unread filter without clicking."""
 
@@ -7922,11 +8005,13 @@ class TestGetUnreadConversations:
                 "name": "Ana Dias",
                 "timestamp": "Sep 7",
                 "snippet": "Ana: are you free?",
+                "unread": False,
             },
             {
                 "name": "Rui Costa",
                 "timestamp": "May 16",
                 "snippet": "InMail \u2022 A role for you",
+                "unread": False,
             },
         ]
         assert "Ana Dias" in result["sections"]["unread_conversations"]
@@ -8001,7 +8086,7 @@ class TestGetUnreadConversations:
         thread_refs.assert_not_awaited()
         mock_page.click.assert_not_called()
         # The evaluate that ran must be the read-only row reader.
-        assert "click()" not in _UNREAD_ROWS_JS
+        assert "click()" not in _CONVERSATION_ROWS_JS
 
 
 class TestGetInbox:

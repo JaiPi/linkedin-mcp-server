@@ -45,6 +45,8 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page |
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox |
+| `get_unread_conversations` | List every unread conversation without marking any of them read |
+| `get_all_conversations` | List every conversation, read and unread, without marking any read |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID |
 | `search_conversations` | Search messages by keyword |
 | `send_message` | Compose/send a new message to a LinkedIn user (requires confirmation; profile-based targeting may open a separate DM instead of replying in an existing thread — see #483) |
