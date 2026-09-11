@@ -437,6 +437,208 @@ async def scroll_job_sidebar(
     return False
 
 
+#: Conversation rows in the messaging sidebar. Structural rather than
+#: text-prefix-based (`aria-label^="Select conversation"`) so it survives any
+#: LinkedIn locale: the verb in the aria-label is locale-dependent, a label
+#: carrying one inside a list item is not. Matches the selector
+#: `_extract_conversation_thread_refs` already waits on.
+_CONVERSATION_ROW_SELECTOR = "main li label[aria-label]"
+
+
+async def scroll_conversation_list(
+    page: Page,
+    settle_timeout: float = 3.0,
+    poll_interval: float = 0.15,
+    min_budget: float = 0.4,
+    max_scrolls: int = 40,
+    deadline: float = 60.0,
+) -> bool:
+    """Scroll the messaging conversation list until it stops producing rows.
+
+    Sibling of :func:`scroll_job_sidebar`, and the waiting strategy is taken
+    from it for the same measured reason: a round that sees nothing waits once
+    more at the full ``settle_timeout`` before the list counts as exhausted,
+    because deciding that after a single short look is what cost a measured job
+    search 4 of its 11 cards. Later rounds start from three times what the
+    previous batch took, floored at ``min_budget``.
+
+    There is no target count. How many conversations the filter yields belongs
+    to LinkedIn, and the caller reads whatever loaded.
+
+    Unlike the job rail there is no container election: the conversation list is
+    the largest scrollable region inside ``main``, the same rule
+    ``_scroll_main_scrollable_region`` uses, and no second scrollable pane
+    competes with it on the messaging page. Growth is measured by row count and
+    by scroll height, so a list that appends rows without growing taller still
+    reads as growing.
+
+    ``max_scrolls`` and ``deadline`` are both larger than the job sidebar's: the
+    unfiltered inbox runs to hundreds of conversations at roughly 20 rows a
+    batch, and the caller is a single tool call that would rather spend a minute
+    than return a third of the list.
+
+    Returns whether the evaluate raised, which the caller needs and cannot see
+    for itself — a navigation destroys the execution context while ``page.url``
+    still reports the address it left.
+    """
+    started = time.monotonic()
+    if deadline <= 0:
+        logger.debug("No scroll budget left for %s, skipping list scroll", page.url)
+        return False
+
+    try:
+        # Never zero: Patchright reads a zero timeout as no timeout at all, so a
+        # spent budget would wait on an empty sidebar until the tool is
+        # cancelled. Attached rather than visible: Ember-managed labels are
+        # reliably attached but Playwright's visibility heuristic does not
+        # always consider them visible.
+        await page.wait_for_selector(
+            _CONVERSATION_ROW_SELECTOR,
+            state="attached",
+            timeout=max(1, min(10000, int(deadline * 1000))),
+        )
+    except PlaywrightTimeoutError:
+        logger.debug("No conversation rows found, skipping list scroll")
+        return False
+    except Exception as exc:
+        logger.warning("Conversation list scroll failed: %s", exc)
+        return True
+
+    remaining = deadline - (time.monotonic() - started)
+    if remaining <= 0:
+        logger.debug("Deadline spent waiting for the first conversation row")
+        return False
+
+    try:
+        result = await page.evaluate(
+            r"""async (opts) => {
+            const {selector, settleMs, pollMs, minBudgetMs,
+                   maxScrolls, deadlineMs} = opts;
+
+            const rowCount = () => document.querySelectorAll(selector).length;
+
+            // The conversation list is the tallest scrollable region inside
+            // main. Recollected per scroll: a re-render replaces the nodes.
+            const pickList = () => {
+                const main = document.querySelector('main');
+                if (!main) return null;
+                const cands = Array.from(main.querySelectorAll('*')).filter(
+                    (el) => {
+                        const s = getComputedStyle(el);
+                        return /auto|scroll/.test(s.overflowY)
+                            && el.scrollHeight > el.clientHeight + 20;
+                    }
+                );
+                cands.sort((a, b) => b.scrollHeight - a.scrollHeight);
+                return cands[0] || main;
+            };
+
+            if (!rowCount()) return {status: 'gone'};
+            let list = pickList();
+            if (!list) return {status: 'no-container'};
+
+            const hardDeadline = Date.now() + deadlineMs;
+            const grewSince = async (rows, height) => {
+                if (!document.contains(list)) {
+                    // A re-render detaches the list mid-wait; polling the old
+                    // node would measure a corpse until the deadline.
+                    const again = pickList();
+                    if (!again) return false;
+                    list = again;
+                }
+                return rowCount() > rows || list.scrollHeight > height;
+            };
+            const waitForGrowth = async (rows, height, budgetMs) => {
+                const until = Math.min(Date.now() + budgetMs, hardDeadline);
+                while (Date.now() < until) {
+                    await new Promise(r => setTimeout(r, pollMs));
+                    if (await grewSince(rows, height)) return true;
+                }
+                return false;
+            };
+
+            const startedWith = rowCount();
+            let budgetMs = settleMs;
+            let scrolls = 0;
+            let timedOut = false;
+            let cappedOut = false;
+
+            for (;;) {
+                if (scrolls >= maxScrolls) { cappedOut = true; break; }
+                if (Date.now() >= hardDeadline) { timedOut = true; break; }
+
+                const beforeRows = rowCount();
+                const beforeHeight = list.scrollHeight;
+                const startedRound = Date.now();
+
+                list.scrollTop = list.scrollHeight;
+                let grew = await waitForGrowth(
+                    beforeRows, beforeHeight, budgetMs
+                );
+                if (!grew) {
+                    // One confirmation round at the full budget: a batch
+                    // slower than the shrunken budget is not an empty list.
+                    list.scrollTop = list.scrollHeight;
+                    grew = await waitForGrowth(
+                        beforeRows, beforeHeight, settleMs
+                    );
+                }
+                if (!grew) {
+                    timedOut = Date.now() >= hardDeadline;
+                    break;
+                }
+
+                const took = Date.now() - startedRound;
+                budgetMs = Math.min(
+                    settleMs, Math.max(minBudgetMs, took * 3)
+                );
+                scrolls++;
+            }
+
+            return {
+                status: 'ok',
+                scrolls,
+                rows: rowCount(),
+                gained: rowCount() - startedWith,
+                timedOut,
+                cappedOut,
+            };
+        }""",
+            {
+                "selector": _CONVERSATION_ROW_SELECTOR,
+                "settleMs": settle_timeout * 1000,
+                "pollMs": poll_interval * 1000,
+                "minBudgetMs": min_budget * 1000,
+                "maxScrolls": max_scrolls,
+                "deadlineMs": remaining * 1000,
+            },
+        )
+    except Exception as exc:
+        # Scrolling is best effort: a navigation or a destroyed context during
+        # the evaluate must not discard the rows the caller is about to read.
+        logger.warning("Conversation list scroll failed: %s", exc)
+        return True
+
+    status = result.get("status")
+    if status == "gone":
+        logger.debug("Conversation rows disappeared before evaluate")
+    elif status == "no-container":
+        logger.debug("No scrollable container found for the conversation list")
+    else:
+        logger.debug(
+            "Conversation list holds %d rows, %+d from %d scrolls%s",
+            result["rows"],
+            result["gained"],
+            result["scrolls"],
+            " (deadline)"
+            if result["timedOut"]
+            else " (scroll cap reached)"
+            if result["cappedOut"]
+            else "",
+        )
+    return False
+
+
 async def handle_modal_close(page: Page) -> bool:
     """Close any popup modals that might be blocking content.
 

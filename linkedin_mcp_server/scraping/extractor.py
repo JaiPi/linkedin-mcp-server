@@ -38,6 +38,7 @@ from linkedin_mcp_server.core.utils import (
     _RAIL_PICK_JS,
     detect_rate_limit,
     handle_modal_close,
+    scroll_conversation_list,
     scroll_job_sidebar,
     scroll_to_bottom,
 )
@@ -259,6 +260,39 @@ _JOB_IDS_JS = (
     return {ids: ids, scoped: Boolean(picked)};
 }"""
 )
+
+# Conversation rows as the messaging sidebar renders them, read without
+# clicking anything. Clicking a row is what `_extract_conversation_thread_refs`
+# does to recover a thread id, and it is also what marks the row read, so this
+# reads only what the DOM already carries: no thread id is available here.
+#
+# A module-level constant rather than an inline string so a `browser_dom` test
+# can import and execute it. The unit suite mocks `page.evaluate`, where this
+# never runs.
+#
+# Rows arrive unhydrated and fill in later: LinkedIn mounts the list item
+# before its label, timestamp and snippet exist. Such a skeleton carries no
+# participant and is skipped rather than emitted as a blank, which on a
+# measured unread view was 25 of 55 rows.
+#
+# The aria-label keeps its locale-dependent prefix; Python strips it with
+# `_strip_select_conversation_prefix`, the same helper the thread-ref path uses.
+_UNREAD_ROWS_JS = r"""() => {
+    const rows = [];
+    const items = document.querySelectorAll('main li.msg-conversation-listitem');
+    for (const li of items) {
+        const label = li.querySelector('label[aria-label]');
+        const time = li.querySelector('time');
+        const snippet = li.querySelector('[class*="message-snippet"]');
+        const aria = label ? (label.getAttribute('aria-label') || '') : '';
+        const timestamp = time ? (time.innerText || '').trim() : '';
+        const preview = snippet ? (snippet.innerText || '').trim() : '';
+        // An unhydrated skeleton: nothing identifies the conversation yet.
+        if (!aria && !timestamp && !preview) continue;
+        rows.push({ariaLabel: aria, timestamp: timestamp, snippet: preview});
+    }
+    return rows;
+}"""
 
 # The routes a job search may legitimately end on. `/jobs/search` is what the
 # URL builder produces; `/jobs/search-results` is where LinkedIn's redesigned
@@ -5682,6 +5716,64 @@ class LinkedInExtractor:
             result["references"] = references
         if section_errors:
             result["section_errors"] = section_errors
+        return result
+
+    async def get_unread_conversations(self) -> dict[str, Any]:
+        """List unread conversations without opening any of them.
+
+        Reads LinkedIn's own unread filter (`/messaging/?filter=unread`) rather
+        than a DOM class. The filter is a plain navigation the server answers,
+        so the set it returns is authoritative and survives LinkedIn renaming a
+        CSS modifier. Measured against a 190-conversation inbox it reported 29
+        unread where the `--unread` class on the default inbox reported 13; the
+        extra rows are threads below the loaded window and LinkedIn's own
+        senders, and the class additionally flagged 6 expired InMails the filter
+        omits.
+
+        Nothing here clicks. `get_inbox` and `get_conversation` recover thread
+        ids by click-visiting rows, which is what marks them read and is exactly
+        the state this tool exists to preserve, so no thread id is returned:
+        LinkedIn's sidebar carries none in the DOM. Open one afterwards with
+        `get_conversation`, whose `linkedin_username` path click-visits only the
+        rows matching that participant.
+
+        The whole filtered list is loaded — it is short, and a cap would hide
+        precisely the backlog a triage pass is for.
+        """
+        url = "https://www.linkedin.com/messaging/?filter=unread"
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        await self._wait_for_main_text(log_context="Unread conversations")
+        await handle_modal_close(self._page)
+
+        # An empty unread list is a legitimate answer, so a sidebar that never
+        # mounts a row is reported as zero conversations rather than raised.
+        await scroll_conversation_list(self._page)
+
+        raw_rows: list[dict[str, str]] = await self._page.evaluate(_UNREAD_ROWS_JS)
+
+        conversations: list[dict[str, str]] = []
+        for row in raw_rows:
+            name = self._strip_select_conversation_prefix(row.get("ariaLabel", ""))
+            conversations.append(
+                {
+                    "name": name,
+                    "timestamp": row.get("timestamp", ""),
+                    "snippet": row.get("snippet", ""),
+                }
+            )
+
+        logger.info("Found %d unread conversations", len(conversations))
+
+        # The text section keeps the shape every scraping tool returns; the
+        # structured key is what a triage pass reads, the way `search_jobs`
+        # adds `job_ids` beside its own text.
+        lines = [
+            f"{c['name']} | {c['timestamp']} | {c['snippet']}" for c in conversations
+        ]
+        text = "\n".join(lines)
+        result = self._single_section_result(url, "unread_conversations", text)
+        result["unread_conversations"] = conversations
         return result
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:

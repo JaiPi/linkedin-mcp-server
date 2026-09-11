@@ -6,6 +6,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
+import contextlib
 import logging
 import time
 
@@ -36,6 +37,7 @@ from linkedin_mcp_server.scraping.extractor import (
     _MESSAGE_CONFIRMATION_PREPARE_JS,
     _MESSAGE_CONFIRMATION_READY_JS,
     _RATE_LIMITED_MSG,
+    _UNREAD_ROWS_JS,
     _build_feed_references,
     _truncate_linkedin_noise,
     strip_conversation_chrome,
@@ -7865,6 +7867,112 @@ class TestScrapePersonProfileUrn:
             result = await extractor.scrape_person("testuser", {"main_profile"})
 
         assert "profile_urn" not in result
+
+
+class TestGetUnreadConversations:
+    """get_unread_conversations reads the unread filter without clicking."""
+
+    @staticmethod
+    def _patches(extractor, rows):
+        """Stub the navigation preamble and hand the JS these rows."""
+        return (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_conversation_list",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor._page, "evaluate", new_callable=AsyncMock, return_value=rows
+            ),
+        )
+
+    async def test_returns_structured_rows(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        rows = [
+            {
+                "ariaLabel": "Select conversation with Ana Dias",
+                "timestamp": "Sep 7",
+                "snippet": "Ana: are you free?",
+            },
+            {
+                "ariaLabel": "Select conversation with Rui Costa",
+                "timestamp": "May 16",
+                "snippet": "InMail \u2022 A role for you",
+            },
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(extractor, rows):
+                stack.enter_context(p)
+            result = await extractor.get_unread_conversations()
+
+        assert result["url"] == "https://www.linkedin.com/messaging/?filter=unread"
+        # The aria-label prefix is stripped; the participant name is what a
+        # triage pass reads and what get_conversation takes back.
+        assert result["unread_conversations"] == [
+            {
+                "name": "Ana Dias",
+                "timestamp": "Sep 7",
+                "snippet": "Ana: are you free?",
+            },
+            {
+                "name": "Rui Costa",
+                "timestamp": "May 16",
+                "snippet": "InMail \u2022 A role for you",
+            },
+        ]
+        assert "Ana Dias" in result["sections"]["unread_conversations"]
+
+    async def test_empty_unread_list(self, mock_page):
+        """An inbox with nothing unread is an answer, not a failure."""
+        extractor = LinkedInExtractor(mock_page)
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(extractor, []):
+                stack.enter_context(p)
+            result = await extractor.get_unread_conversations()
+
+        assert result["unread_conversations"] == []
+
+    async def test_never_clicks_a_row(self, mock_page):
+        """The whole point: no row is clicked, so nothing is marked read.
+
+        Clicking is how the thread-ref path recovers ids, and it is also what
+        marks a conversation read. A regression that reintroduced it would leave
+        this tool quietly destroying the state it exists to preserve.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        rows = [
+            {
+                "ariaLabel": "Select conversation with Ana Dias",
+                "timestamp": "Sep 7",
+                "snippet": "hi",
+            }
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self._patches(extractor, rows):
+                stack.enter_context(p)
+            thread_refs = stack.enter_context(
+                patch.object(
+                    extractor,
+                    "_extract_conversation_thread_refs",
+                    new_callable=AsyncMock,
+                    return_value=[],
+                )
+            )
+            await extractor.get_unread_conversations()
+
+        thread_refs.assert_not_awaited()
+        mock_page.click.assert_not_called()
+        # The evaluate that ran must be the read-only row reader.
+        assert "click()" not in _UNREAD_ROWS_JS
 
 
 class TestGetInbox:

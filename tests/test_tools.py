@@ -34,6 +34,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
+    mock.get_unread_conversations = AsyncMock(return_value=scrape_result)
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
@@ -918,6 +919,66 @@ class TestMessagingTools:
         assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
         mock_extractor.get_inbox.assert_awaited_once_with(limit=20)
 
+    async def test_get_unread_conversations_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/?filter=unread",
+            "sections": {"unread_conversations": "Ana Dias | Sep 7 | Hi there"},
+            "unread_conversations": [
+                {"name": "Ana Dias", "timestamp": "Sep 7", "snippet": "Hi there"},
+            ],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_unread_conversations")
+        result = await tool_fn(mock_context, extractor=mock_extractor)
+
+        assert result["unread_conversations"] == [
+            {"name": "Ana Dias", "timestamp": "Sep 7", "snippet": "Hi there"}
+        ]
+        # No limit, and nothing else to pass: the whole filtered list is read.
+        mock_extractor.get_unread_conversations.assert_awaited_once_with()
+
+    async def test_get_unread_conversations_is_read_only(self):
+        """The one messaging tool that may claim readOnlyHint.
+
+        get_inbox, get_conversation and search_conversations click rows to
+        recover thread ids, which marks them read. This tool exists because that
+        destroys the state a triage pass needs, so the annotation is part of its
+        contract rather than decoration.
+        """
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool = await mcp.get_tool("get_unread_conversations")
+        assert tool.annotations is not None
+        assert tool.annotations.readOnlyHint is True
+
+    async def test_get_unread_conversations_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.get_unread_conversations = AsyncMock(
+            side_effect=SessionExpiredError()
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_unread_conversations")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(mock_context, extractor=mock_extractor)
+
     async def test_get_conversation_success(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/messaging/thread/abc123/",
@@ -1716,6 +1777,7 @@ class TestToolTimeouts:
             "search_jobs",
             "get_saved_jobs",
             "get_inbox",
+            "get_unread_conversations",
             "get_conversation",
             "search_conversations",
             "send_message",
@@ -1749,6 +1811,7 @@ class TestToolTimeouts:
             "search_jobs",
             "get_saved_jobs",
             "get_inbox",
+            "get_unread_conversations",
             "get_conversation",
             "search_conversations",
             "send_message",

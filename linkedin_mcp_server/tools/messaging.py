@@ -78,6 +78,68 @@ def register_messaging_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        # Genuinely read-only, unlike the tools below: it reads LinkedIn's own
+        # unread filter and clicks nothing. Thread ids are the reason the others
+        # click, and this tool returns none for exactly that reason, so an
+        # unread conversation stays unread after it runs.
+        title="Get Unread Conversations",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"messaging", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_unread_conversations(
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List every unread conversation without marking any of them read.
+
+        Use this to triage an inbox: it reads LinkedIn's own unread filter, so
+        no conversation is opened and the unread state is left intact. Prefer it
+        over get_inbox, which click-visits rows to recover thread IDs and
+        thereby marks them read.
+
+        No thread IDs are returned — LinkedIn's sidebar does not carry them in
+        the DOM, and recovering one requires the click this tool avoids. To read
+        a specific conversation afterwards, pass its participant name to
+        get_conversation as linkedin_username.
+
+        The entire unread list is loaded, with no limit to set.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, sections (unread_conversations -> one line per
+            conversation), and unread_conversations, a list of
+            {name, timestamp, snippet} in inbox order.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_unread_conversations"
+            )
+            logger.info("Fetching unread conversations")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading unread conversations"
+            )
+
+            result = await extractor.get_unread_conversations()
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_unread_conversations")
+        except Exception as e:
+            raise_tool_error(e, "get_unread_conversations")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Get Conversation",
         # Not read-only, though it reads: resolving a username enumerates the
         # inbox by click-visiting rows, and LinkedIn marks a visited row as read.

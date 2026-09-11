@@ -1,0 +1,230 @@
+"""Browser-DOM tests for the unread conversation row reader and list scroll.
+
+The unit suite mocks ``page.evaluate``, so neither ``_UNREAD_ROWS_JS`` nor the
+scrolling JS in ``scroll_conversation_list`` ever executes there. These tests run
+both against a synthetic conversation list in headless chromium, where each
+scroll appends the next batch after a delay. That delay is the point: it stands
+in for the user's connection, and the loop has to survive a batch that arrives
+later than the previous one did.
+
+The fixture drives a synthetic container rather than imitating LinkedIn's
+markup, so these are claims about the algorithm. The one exception is the row
+shape itself (``li.msg-conversation-listitem`` holding a ``label[aria-label]``,
+a ``<time>`` and a snippet), which is a claim about LinkedIn taken from the live
+DOM and from the shape ``_extract_conversation_thread_refs`` already documents.
+
+Skipped automatically when chromium is not installed; run locally after
+``uv run patchright install chromium --no-shell``.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+from patchright.async_api import async_playwright
+
+from linkedin_mcp_server.core.utils import scroll_conversation_list
+from linkedin_mcp_server.scraping.extractor import _UNREAD_ROWS_JS
+
+#: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
+#: worker so browser startups cannot compete with the DOM cases' wall-clock
+#: timers.
+pytestmark = [
+    pytest.mark.browser_dom,
+    pytest.mark.xdist_group("browser_runtime"),
+]
+
+
+def row(i: int, *, skeleton: bool = False) -> str:
+    """One conversation row; a skeleton is mounted but not yet hydrated."""
+    if skeleton:
+        # What LinkedIn mounts before the content arrives: the list item and its
+        # card exist, the label, time and snippet do not.
+        return (
+            '<li class="ember-view msg-conversation-listitem">'
+            '<div class="msg-conversation-card"></div></li>'
+        )
+    return (
+        '<li class="ember-view msg-conversation-listitem">'
+        '<div class="msg-conversation-card">'
+        "<label"
+        f' aria-label="Select conversation with Person {i}"></label>'
+        f"<time>Sep {i}</time>"
+        f'<p class="msg-conversation-card__message-snippet">Hello {i}</p>'
+        "</div></li>"
+    )
+
+
+def conversation_list(
+    total: int,
+    batch: int,
+    delays: list[int],
+    initial: int = 5,
+    skeletons: int = 0,
+) -> str:
+    """A scrollable list that appends `batch` rows after each scroll.
+
+    ``delays`` gives the delay of each successive batch in ms, so a fixture can
+    vary latency the way a real connection does; the last value repeats.
+    ``skeletons`` appends that many unhydrated rows, which is what the live
+    unread view holds below the rows it has filled in.
+    """
+    first = "".join(row(i) for i in range(initial))
+    # Skeletons sit below the hydrated rows from the start when the fixture
+    # never scrolls; the scroll path appends its own further down.
+    if initial >= total:
+        first += "".join(row(0, skeleton=True) for _ in range(skeletons))
+    return f"""
+<!doctype html>
+<html><body style="margin:0">
+<main>
+  <div id="list" style="height:120px;overflow-y:scroll">
+    <ul id="rows">{first}</ul>
+  </div>
+</main>
+<script>
+  const total = {total}, batch = {batch}, delays = {delays!r};
+  const skeletons = {skeletons};
+  let rendered = {initial}, round = 0, pending = false;
+  const rowHtml = (i) =>
+    '<li class="ember-view msg-conversation-listitem">' +
+    '<div class="msg-conversation-card">' +
+    '<label aria-label="Select conversation with Person ' + i + '"></label>' +
+    '<time>Sep ' + i + '</time>' +
+    '<p class="msg-conversation-card__message-snippet">Hello ' + i + '</p>' +
+    '</div></li>';
+  const skeletonHtml =
+    '<li class="ember-view msg-conversation-listitem">' +
+    '<div class="msg-conversation-card"></div></li>';
+  const list = document.getElementById('list');
+  const rows = document.getElementById('rows');
+  list.addEventListener('scroll', () => {{
+    if (pending || rendered >= total) return;
+    pending = true;
+    const delay = delays[Math.min(round, delays.length - 1)];
+    round++;
+    setTimeout(() => {{
+      let html = '';
+      for (let i = rendered; i < Math.min(total, rendered + batch); i++) {{
+        html += rowHtml(i);
+      }}
+      rendered = Math.min(total, rendered + batch);
+      if (rendered >= total) {{
+        for (let s = 0; s < skeletons; s++) html += skeletonHtml;
+      }}
+      rows.insertAdjacentHTML('beforeend', html);
+      pending = false;
+    }}, delay);
+  }});
+</script>
+</body></html>
+"""
+
+
+async def read_rows(page) -> list[dict[str, str]]:
+    """What `get_unread_conversations` reads, return shape alike."""
+    return await page.evaluate(_UNREAD_ROWS_JS)
+
+
+def _chrome_path() -> str | None:
+    """A full chromium to drive these fixtures with.
+
+    Patchright's default launch wants a ``chromium_headless_shell`` build, which
+    this project does not install: the server launches a full chromium and pins
+    it with ``--chrome-path``/``CHROME_PATH`` so the browser matches the one that
+    wrote the saved profile. Honour that same variable, then fall back to the
+    newest revision under the server's own browser directory.
+    """
+    explicit = os.getenv("CHROME_PATH", "").strip()
+    if explicit and Path(explicit).exists():
+        return explicit
+    root = Path.home() / ".linkedin-mcp" / "patchright-browsers"
+    candidates = sorted(root.glob("chromium-*/chrome-linux64/chrome"))
+    return str(candidates[-1]) if candidates else None
+
+
+@pytest.fixture
+async def page():
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(
+                headless=True, executable_path=_chrome_path()
+            )
+        except Exception as exc:  # noqa: BLE001 - environment, not a failure
+            pytest.skip(f"chromium unavailable: {exc}")
+        ctx = await browser.new_context()
+        yield await ctx.new_page()
+        await browser.close()
+
+
+async def test_reads_name_time_and_snippet(page):
+    await page.set_content(conversation_list(total=5, batch=5, delays=[10], initial=5))
+    rows = await read_rows(page)
+
+    assert len(rows) == 5
+    assert rows[0] == {
+        "ariaLabel": "Select conversation with Person 0",
+        "timestamp": "Sep 0",
+        "snippet": "Hello 0",
+    }
+
+
+async def test_skips_unhydrated_skeleton_rows(page):
+    """A mounted row with no content is not a conversation.
+
+    The live unread view held 25 such rows out of 55. Emitting them would fill a
+    triage list with blanks that cannot be opened or dismissed.
+    """
+    await page.set_content(
+        conversation_list(total=3, batch=3, delays=[10], initial=3, skeletons=4)
+    )
+    # The skeletons are in the DOM and match the row selector.
+    assert await page.locator("li.msg-conversation-listitem").count() == 7
+
+    rows = await read_rows(page)
+
+    assert len(rows) == 3
+    assert all(r["ariaLabel"] for r in rows)
+
+
+async def test_scroll_loads_every_row(page):
+    await page.set_content(
+        conversation_list(total=40, batch=10, delays=[60], initial=5)
+    )
+    assert len(await read_rows(page)) == 5
+
+    raised = await scroll_conversation_list(page, settle_timeout=2.0, deadline=20.0)
+
+    assert raised is False
+    assert len(await read_rows(page)) == 40
+
+
+async def test_survives_a_batch_slower_than_the_last(page):
+    """The confirmation round at the full settle timeout is what buys these rows.
+
+    A loop that gave up after one shrunken budget would stop at the row count
+    the fast batches reached. Delays rise so the shrinking budget is certain to
+    be too small for the final batch.
+    """
+    await page.set_content(
+        conversation_list(total=35, batch=10, delays=[40, 40, 900], initial=5)
+    )
+
+    raised = await scroll_conversation_list(
+        page, settle_timeout=2.0, min_budget=0.1, deadline=25.0
+    )
+
+    assert raised is False
+    assert len(await read_rows(page)) == 35
+
+
+async def test_stops_on_a_list_that_never_grows(page):
+    """An exhausted list ends the loop instead of spending the whole deadline."""
+    await page.set_content(conversation_list(total=5, batch=0, delays=[10], initial=5))
+
+    raised = await scroll_conversation_list(page, settle_timeout=0.5, deadline=20.0)
+
+    assert raised is False
+    assert len(await read_rows(page)) == 5
