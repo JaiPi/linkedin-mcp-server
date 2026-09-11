@@ -33,7 +33,15 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Inbox",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        # Not read-only, though it reads, and the hint is not documentation:
+        # `daemon_auth.a_repeat_could_change_something` reads `readOnlyHint` to
+        # decide whether a failed call may be replayed automatically, after a
+        # sign-in or after a replacement browser owner is elected. This tool
+        # click-visits every row to recover thread ids, which marks those rows
+        # read, so a silent replay would mark more of them. Same reason
+        # `get_conversation` and `search_conversations` below omit it;
+        # `get_all_conversations` reads the same listing without clicking.
+        annotations={"openWorldHint": True},
         tags={"messaging", "scraping"},
         exclude_args=["extractor"],
     )
@@ -75,6 +83,71 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "get_inbox")
         except Exception as e:
             raise_tool_error(e, "get_inbox")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        # Genuinely read-only, like get_unread_conversations and unlike
+        # get_inbox: it reads the same sidebar listing without clicking a row, so
+        # nothing is marked read and an automatic replay cannot change anything.
+        title="Get All Conversations",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"messaging", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_all_conversations(
+        ctx: Context,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List every conversation, read and unread, without marking any read.
+
+        Use this to inventory an inbox. Prefer it over get_inbox, which
+        click-visits rows to recover thread IDs and thereby marks them read.
+
+        Each row carries an `unread` flag taken from the conversation card's own
+        state. Treat it as advisory: measured against a 190-conversation inbox it
+        flagged 13 rows where LinkedIn's own unread filter reported 30. Call
+        get_unread_conversations for the authoritative unread set.
+
+        No thread IDs are returned — LinkedIn's sidebar does not carry them in
+        the DOM, and recovering one requires the click this tool avoids. To read
+        a specific conversation afterwards, pass its participant name to
+        get_conversation as linkedin_username.
+
+        Every conversation is loaded, with no limit to set, so expect tens of
+        seconds on a large inbox.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, sections (all_conversations -> one line per
+            conversation, unread rows prefixed), and all_conversations, a list of
+            {name, timestamp, snippet, unread} in inbox order.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_all_conversations"
+            )
+            logger.info("Fetching all conversations")
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading conversations"
+            )
+
+            result = await extractor.get_all_conversations()
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_all_conversations")
+        except Exception as e:
+            raise_tool_error(e, "get_all_conversations")  # NoReturn
 
     @mcp.tool(
         timeout=tool_timeout,
