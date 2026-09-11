@@ -7931,6 +7931,35 @@ class TestGetUnreadConversations:
         ]
         assert "Ana Dias" in result["sections"]["unread_conversations"]
 
+    async def test_decodes_html_entities_in_names(self, mock_page):
+        """LinkedIn double-encodes the aria-label, so the name arrives escaped.
+
+        `getAttribute` already decodes the attribute once. A name reaching Python
+        as `&quot;` text therefore means LinkedIn encoded it twice, and the
+        entity text would otherwise flow into get_conversation as the name it
+        matches rows against.
+        """
+        extractor = LinkedInExtractor(mock_page)
+        rows = [
+            {
+                "ariaLabel": ("Select conversation with Fundação &quot;la Caixa&quot;"),
+                "timestamp": "Jul 24, 2019",
+                "snippet": "Sponsored",
+            },
+            {
+                "ariaLabel": "Select conversation with Jen &amp; the Sales Team",
+                "timestamp": "Jun 18, 2019",
+                "snippet": "LinkedIn Offer",
+            },
+        ]
+        with contextlib.ExitStack() as stack:
+            for patcher in self._patches(extractor, rows):
+                stack.enter_context(patcher)
+            result = await extractor.get_unread_conversations()
+
+        names = [c["name"] for c in result["unread_conversations"]]
+        assert names == ['Fundação "la Caixa"', "Jen & the Sales Team"]
+
     async def test_empty_unread_list(self, mock_page):
         """An inbox with nothing unread is an answer, not a failure."""
         extractor = LinkedInExtractor(mock_page)

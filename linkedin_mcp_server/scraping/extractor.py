@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import Iterator
 from dataclasses import dataclass
+import html
 import json
 import logging
 import re
@@ -5940,7 +5941,15 @@ class LinkedInExtractor:
 
     @classmethod
     def _strip_select_conversation_prefix(cls, aria_label: str) -> str:
-        return cls._SELECT_CONVERSATION_PREFIX_RE.sub("", aria_label).strip()
+        # Unescaped because LinkedIn double-encodes the attribute: a participant
+        # whose name contains a quote or an ampersand arrives as the entity text
+        # `Fundacao &quot;la Caixa&quot;` from `getAttribute`, which decodes the
+        # attribute once already. Left alone, that entity text reaches
+        # `get_conversation` as part of the name it matches rows against, and
+        # matches nothing.
+        return html.unescape(
+            cls._SELECT_CONVERSATION_PREFIX_RE.sub("", aria_label)
+        ).strip()
 
     async def get_conversation(
         self,
