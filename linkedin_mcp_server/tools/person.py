@@ -83,7 +83,7 @@ def register_person_tools(
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
-                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
+                Available sections: experience, education, interests, honors, volunteering, languages, certifications, skills, projects, contact_info, posts
                 Examples: "experience,education", "contact_info", "skills,projects", "honors,languages", "posts"
                 Default (None) scrapes only the main profile page.
             max_scrolls: Maximum pagination attempts per section to load more content.
@@ -365,7 +365,7 @@ def register_person_tools(
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
-                Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts
+                Available sections: experience, education, interests, honors, volunteering, languages, certifications, skills, projects, contact_info, posts
                 Examples: "experience,education", "contact_info", "skills,projects"
                 Default (None) scrapes only the main profile page.
             max_scrolls: Maximum pagination attempts per section (same as get_person_profile).
