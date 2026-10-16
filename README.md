@@ -11,6 +11,24 @@
 
 > **Disclaimer:** This is an independent, community project. It is not affiliated with, authorized by, endorsed by, or sponsored by LinkedIn Corporation or Microsoft. "LinkedIn" is a registered trademark of LinkedIn Corporation and is used here only descriptively to identify the third-party service this software interoperates with.
 
+## About this fork
+
+My fork of [stickerdaniel/linkedin-mcp-server](https://github.com/stickerdaniel/linkedin-mcp-server).
+I use it to triage my LinkedIn inbox through Claude, and it carries the changes daily use needed:
+
+- Inbox readers that never click (`get_unread_conversations`, `get_all_conversations`), so
+  listing the inbox no longer marks every conversation read.
+- `get_inbox` no longer claims to be read-only. The daemon used that flag to replay failed calls
+  silently, and each replay marked more conversations read.
+- `get_conversation` lists a participant's other threads, so a newer reply is not missed.
+- Message attachments can be listed and downloaded.
+- A `volunteering` section for person profiles. Upstream fell back to the main profile without
+  saying so.
+- HTML entities in participant names are decoded.
+
+Each change goes upstream as its own pull request. The first is
+[#1357](https://github.com/stickerdaniel/linkedin-mcp-server/pull/1357).
+
 An MCP server that lets AI assistants like Claude read LinkedIn data through your own logged-in browser session. Access profiles and companies, search for jobs, or get job details.
 
 ## Sponsor
