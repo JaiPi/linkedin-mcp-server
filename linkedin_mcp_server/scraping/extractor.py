@@ -558,36 +558,72 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
             return false;
         }
     };
+    // Every refusal names the check that fired and what it counted, so a
+    // failure seen live can be told apart without reproducing it by hand.
+    const unresolved = (reason, diag = {}) => ({
+        status: 'unresolved',
+        reason,
+        pageUrl: window.location.href,
+        diag,
+    });
     const main = document.querySelector('main');
-    if (!main) return {status: 'unresolved'};
+    if (!main) return unresolved('no_main');
 
-    const section = Array.from(main.children).find(
-        element => element.matches('section') && visible(element)
-    );
-    if (!section) return {status: 'unresolved'};
-    const headings = Array.from(section.querySelectorAll('h1')).filter(
+    // The classic layout puts the top card directly under <main>. The
+    // server-driven one wraps the whole primary column in a section and nests
+    // the top card inside it, so there the top card is the first visible
+    // section that holds no other section. Sections inside <aside> are
+    // suggestions for other people, with Message actions carrying their URNs.
+    const section =
+        Array.from(main.children).find(
+            element => element.matches('section') && visible(element)
+        ) ||
+        Array.from(main.querySelectorAll('section')).find(
+            element =>
+                visible(element) &&
+                !element.closest('aside') &&
+                !element.querySelector('section')
+        );
+    if (!section) {
+        return unresolved('no_top_card', {
+            mainSections: main.querySelectorAll('section').length,
+            mainChildSections: Array.from(main.children).filter(
+                element => element.matches('section')
+            ).length,
+        });
+    }
+    const ownHeadings = selector => Array.from(section.querySelectorAll(selector)).filter(
         heading => visible(heading) && heading.closest('section') === section
     );
+    // The server-driven top card has no h1; the person's name is its only h2.
+    let headings = ownHeadings('h1');
+    if (headings.length === 0) headings = ownHeadings('h2');
     const visibleComposeAnchors = Array.from(
         section.querySelectorAll('a[href*="/messaging/compose/"]')
     ).filter(anchor => visible(anchor) && anchor.closest('section') === section);
     const composeAnchors = visibleComposeAnchors.filter(active);
-    if (
-        headings.length !== 1 ||
-        composeAnchors.length > 1 ||
-        (composeAnchors.length === 1 && visibleComposeAnchors.length !== 1)
-    ) {
-        return {status: 'unresolved'};
+    const diag = {
+        headings: headings.length,
+        visibleAnchors: visibleComposeAnchors.length,
+        activeAnchors: composeAnchors.length,
+        hrefs: visibleComposeAnchors.map(anchor => anchor.getAttribute('href') || ''),
+    };
+    if (headings.length !== 1) return unresolved('heading_count', diag);
+    if (composeAnchors.length > 1) {
+        return unresolved('multiple_active_anchors', diag);
+    }
+    if (composeAnchors.length === 1 && visibleComposeAnchors.length !== 1) {
+        return unresolved('inactive_duplicate', diag);
     }
     if (composeAnchors.length === 0) {
         return visibleComposeAnchors.length === 0
             ? {status: 'unavailable', pageUrl: window.location.href}
-            : {status: 'unresolved'};
+            : unresolved('all_inactive', diag);
     }
 
     const anchor = composeAnchors[0];
     const composeHref = anchor.getAttribute('href') || anchor.href || '';
-    if (!validComposeHref(composeHref)) return {status: 'unresolved'};
+    if (!validComposeHref(composeHref)) return unresolved('invalid_href', diag);
     return {
         status: 'resolved',
         pageUrl: window.location.href,
@@ -602,6 +638,9 @@ _PROFILE_MESSAGE_TARGET_READY_JS = (
     f"() => ({_PROFILE_MESSAGE_TARGET_JS})().status === 'resolved'"
 )
 _PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 1_000
+# A reason the target snapshot reports is passed to the tool result, so only
+# a short snake_case name is accepted from the page.
+_JS_REASON_RE = re.compile(r"[a-z][a-z_]{0,39}")
 _MESSAGE_SUBMIT_READY_TIMEOUT_MS = 1_000
 _MESSAGE_CLEANUP_TIMEOUT_SECONDS = 1.0
 
@@ -1390,6 +1429,8 @@ class _ProfileMessageTarget:
 class _ProfileMessageTargetResolution:
     status: Literal["resolved", "unavailable", "failed"]
     target: _ProfileMessageTarget | None = None
+    # Which check refused the page; set only when ``status`` is ``failed``.
+    reason: str | None = None
 
 
 def _safe_linkedin_url(value: str, *, base: str | None = None) -> ParseResult | None:
@@ -2244,6 +2285,7 @@ class LinkedInExtractor:
         recipient_selected: bool = False,
         sent: bool = False,
         retry_safe: bool = True,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Build a structured response for the send_message tool.
 
@@ -2253,9 +2295,10 @@ class LinkedInExtractor:
         alone can re-send a message that may already have arrived, which is
         what ``retry_safe`` exists to say: it is false from the moment a
         submission is attempted, and true only while nothing can have left
-        the composer.
+        the composer. ``reason`` names the check that refused the profile's
+        Message action, and is present only when one did.
         """
-        return {
+        result: dict[str, Any] = {
             "url": url,
             "status": status,
             "message": message,
@@ -2263,6 +2306,9 @@ class LinkedInExtractor:
             "sent": sent,
             "retry_safe": retry_safe,
         }
+        if reason is not None:
+            result["reason"] = reason
+        return result
 
     async def _log_navigation_failure(
         self,
@@ -3995,41 +4041,62 @@ class LinkedInExtractor:
         except Exception:
             logger.debug("Could not wait for the profile Message action", exc_info=True)
 
+        data: Any = None
+
+        def failed(reason: str) -> _ProfileMessageTargetResolution:
+            # The only record of which check fired. The diagnostics carry
+            # compose hrefs, so they stay in the debug log and never reach
+            # the tool result.
+            page_url = data.get("pageUrl") if isinstance(data, dict) else None
+            diag = data.get("diag") if isinstance(data, dict) else None
+            logger.debug(
+                "Profile Message action unresolved: reason=%s page=%s diag=%s",
+                reason,
+                page_url,
+                diag,
+            )
+            return _ProfileMessageTargetResolution("failed", reason=reason)
+
         try:
             data = await self._page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
         except Exception:
             logger.debug("Could not inspect the profile Message action", exc_info=True)
-            return _ProfileMessageTargetResolution("failed")
+            return failed("evaluate_error")
         if not isinstance(data, dict):
-            return _ProfileMessageTargetResolution("failed")
+            return failed("bad_payload")
         if data.get("status") == "unavailable":
             page_url = data.get("pageUrl")
             if (
                 not isinstance(page_url, str)
                 or _profile_path_from_url(page_url) is None
             ):
-                return _ProfileMessageTargetResolution("failed")
+                return failed("unavailable_bad_page_url")
             return _ProfileMessageTargetResolution("unavailable")
         if data.get("status") != "resolved":
-            return _ProfileMessageTargetResolution("failed")
+            reason = data.get("reason")
+            return failed(
+                reason
+                if isinstance(reason, str) and _JS_REASON_RE.fullmatch(reason)
+                else "unresolved"
+            )
 
         page_url = data.get("pageUrl")
         compose_hrefs = data.get("composeHrefs")
         if not isinstance(page_url, str) or not isinstance(compose_hrefs, list):
-            return _ProfileMessageTargetResolution("failed")
+            return failed("bad_payload")
         profile_path = _profile_path_from_url(page_url)
         if profile_path is None:
-            return _ProfileMessageTargetResolution("failed")
+            return failed("profile_path_rejected")
         if len(compose_hrefs) != 1 or not isinstance(compose_hrefs[0], str):
-            return _ProfileMessageTargetResolution("failed")
+            return failed("compose_href_count")
 
         parsed_compose = _safe_linkedin_url(compose_hrefs[0], base=page_url)
         if parsed_compose is None:
-            return _ProfileMessageTargetResolution("failed")
+            return failed("unsafe_compose_href")
         compose_url = parsed_compose.geturl()
         profile_urn = _profile_urn_from_compose_url(compose_url)
         if profile_urn is None:
-            return _ProfileMessageTargetResolution("failed")
+            return failed("no_profile_urn")
 
         display_name = data.get("displayName")
         if not isinstance(display_name, str) or not display_name.strip():
@@ -6476,6 +6543,7 @@ class LinkedInExtractor:
                 "recipient_resolution_failed",
                 "LinkedIn did not expose one unambiguous recipient-specific Message "
                 "action.",
+                reason=resolution.reason,
             )
 
         supplied_urn = _normalize_profile_urn(profile_urn) if profile_urn else None

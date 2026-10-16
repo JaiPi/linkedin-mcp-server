@@ -27,6 +27,7 @@ pytestmark = [
 ]
 
 TARGET = {"profilePath": "/in/testuser/", "profileUrn": "ACoAAB"}
+_ANCHOR = '<a style="display:block" href="/messaging/compose/?recipient=ACoAAB">Msg</a>'
 
 
 def _message_target() -> _ProfileMessageTarget:
@@ -242,6 +243,114 @@ class TestProfileMessageTargetDom:
 
         assert result["displayName"] == "Test User"
         assert result["composeHrefs"] == ["/messaging/compose/?recipient=ACoAAB"]
+
+    async def test_finds_the_nested_top_card_of_the_server_driven_layout(
+        self, dom_page
+    ):
+        """The shape measured on a live profile on 2026-10-16.
+
+        <main> holds one div, the primary column is a section wrapping every
+        card, the top card has no h1 and carries the name as its only h2, a
+        hidden responsive duplicate of its Message link, and the <aside>
+        offers Message links for other people.
+        """
+        hidden = _ANCHOR.replace('style="display:block"', 'style="display:none"')
+        await _set_composer_content(
+            dom_page,
+            f"""<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+            <main><div><div>
+              <section>
+                <div><section><h2>Test User</h2>{_ANCHOR}{hidden}</section></div>
+                <div><section><h2>About</h2></section></div>
+              </section>
+              <aside><section><h2>Explore profiles</h2>
+                {_ANCHOR.replace("ACoAAB", "OTHER1")}
+                {_ANCHOR.replace("ACoAAB", "OTHER2")}
+              </section></aside>
+            </div></div></main></body></html>""",
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "resolved"
+        assert result["displayName"] == "Test User"
+        assert result["composeHrefs"] == ["/messaging/compose/?recipient=ACoAAB"]
+
+    async def test_never_takes_the_top_card_from_an_aside(self, dom_page):
+        await _set_composer_content(
+            dom_page,
+            f"""<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+            <main><div>
+              <aside><section><h2>Other Person</h2>
+                {_ANCHOR.replace("ACoAAB", "OTHER")}
+              </section></aside>
+              <section><div><section><h2>Test User</h2>{_ANCHOR}</section></div>
+              </section>
+            </div></main></body></html>""",
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "resolved"
+        assert result["composeHrefs"] == ["/messaging/compose/?recipient=ACoAAB"]
+
+    @pytest.mark.parametrize(
+        ("body", "reason", "diag"),
+        [
+            ("<div><h1>Test User</h1></div>", "no_main", {}),
+            (
+                "<main><div><aside><section><h2>Suggested</h2>"
+                f"{_ANCHOR}</section></aside></div></main>",
+                "no_top_card",
+                {"mainSections": 1, "mainChildSections": 0},
+            ),
+            (
+                "<main><section><h1>Test User</h1><h1>Again</h1>"
+                f"{_ANCHOR}</section></main>",
+                "heading_count",
+                {"headings": 2, "visibleAnchors": 1, "activeAnchors": 1},
+            ),
+            (
+                f"<main><section><h1>Test User</h1>{_ANCHOR}{_ANCHOR}</section></main>",
+                "multiple_active_anchors",
+                {"headings": 1, "visibleAnchors": 2, "activeAnchors": 2},
+            ),
+            (
+                f"<main><section><h1>Test User</h1>{_ANCHOR}"
+                f"{_ANCHOR.replace('<a ', '<a aria-disabled="true" ')}"
+                "</section></main>",
+                "inactive_duplicate",
+                {"headings": 1, "visibleAnchors": 2, "activeAnchors": 1},
+            ),
+            (
+                "<main><section><h1>Test User</h1>"
+                f"{_ANCHOR.replace('<a ', '<a aria-disabled="true" ')}"
+                "</section></main>",
+                "all_inactive",
+                {"headings": 1, "visibleAnchors": 1, "activeAnchors": 0},
+            ),
+            (
+                "<main><section><h1>Test User</h1>"
+                f"{_ANCHOR.replace('ACoAAB', 'ACoAAB&recipient=OTHER')}"
+                "</section></main>",
+                "invalid_href",
+                {"headings": 1, "visibleAnchors": 1, "activeAnchors": 1},
+            ),
+        ],
+    )
+    async def test_each_refusal_names_its_check(self, dom_page, body, reason, diag):
+        await _set_composer_content(
+            dom_page,
+            '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+            f"<body>{body}</body></html>",
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "unresolved"
+        assert result["reason"] == reason
+        assert result["pageUrl"].startswith("https://www.linkedin.com/")
+        assert {key: result["diag"][key] for key in diag} == diag
 
 
 class TestMessageComposerDom:
