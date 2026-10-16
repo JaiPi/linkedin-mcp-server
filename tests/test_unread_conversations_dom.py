@@ -324,6 +324,82 @@ async def test_get_conversation_lists_the_participants_other_thread(page):
     assert "Vamos retomar" not in conversation
 
 
+def attachment_button(file_name: str, size: str, content: str) -> str:
+    """The live attachment control: one button holding name, size and label.
+
+    The sender lines around it keep their run of spaces as the live innerText
+    does ("Jaime Pignatelli   6:39 PM"); plain HTML whitespace would collapse it.
+
+    Clicking serves `content` as a download, the way LinkedIn's button does.
+    """
+    return (
+        '<button type="button" onclick="'
+        "const a = document.createElement('a');"
+        f"a.href = 'data:application/pdf,{content}';"
+        f"a.download = '{file_name}'; a.click();"
+        '">'
+        f"<div><div><p>{file_name}</p><p>{size}</p></div>"
+        "<div><p>Download</p></div></div></button>"
+    )
+
+
+ATTACHMENT_PAGE = f"""
+<!doctype html>
+<html><body>
+<main>
+  <ul>{named_row("Ana Lopes", "9:05 AM", "Ana sent an attachment")}</ul>
+  <p>Load more conversations</p>
+  <p>Open the options list in your conversation with Ana Lopes and Jaime Pignatelli</p>
+  <p>Ana Lopes<span style="white-space:pre">   </span>9:00 AM</p>
+  {attachment_button("JD.pdf", "10 KB", "old")}
+  <p>Download</p>
+  <p>Ana Lopes<span style="white-space:pre">   </span>9:05 AM</p>
+  {attachment_button("JD.pdf", "11 KB", "new")}
+  <p>Maximize compose field</p>
+  <p>Open send options</p>
+</main>
+</body></html>
+"""
+
+
+async def test_download_attachment_saves_the_newest_resend(page, tmp_path):
+    """Two files named JD.pdf, and a bare "Download" message between them.
+
+    index 0 must save the newer file: the click target is chosen among the
+    buttons carrying that name, so the quoted label cannot shift it.
+    """
+    extractor = LinkedInExtractor(page)
+
+    async def load(_url: str) -> None:
+        await page.set_content(ATTACHMENT_PAGE)
+
+    with (
+        patch.object(extractor, "_navigate_to_page", AsyncMock(side_effect=load)),
+        patch(
+            "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "linkedin_mcp_server.scraping.extractor.auth_root_dir",
+            return_value=tmp_path,
+        ),
+    ):
+        first = await extractor.download_attachment("2-abc", "JD.pdf")
+        second = await extractor.download_attachment("2-abc", "JD.pdf")
+
+    saved = Path(first["saved_path"])
+    assert saved == tmp_path / "downloads" / "JD.pdf"
+    assert saved.read_bytes() == b"new"
+    assert saved.stat().st_mode & 0o777 == 0o600
+    assert (first["size"], first["sent_at"]) == ("11 KB", "9:05 AM")
+    # A second save never overwrites the first.
+    assert Path(second["saved_path"]).name == "JD (1).pdf"
+
+
 async def test_stops_on_a_list_that_never_grows(page):
     """An exhausted list ends the loop instead of spending the whole deadline."""
     await page.set_content(conversation_list(total=5, batch=0, delays=[10], initial=5))

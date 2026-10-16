@@ -37,6 +37,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_unread_conversations = AsyncMock(return_value=scrape_result)
     mock.get_all_conversations = AsyncMock(return_value=scrape_result)
     mock.get_conversation = AsyncMock(return_value=scrape_result)
+    mock.download_attachment = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
@@ -1111,6 +1112,33 @@ class TestMessagingTools:
         )
 
         assert result["participant_threads"] == threads
+
+    async def test_download_attachment_passes_arguments_and_result(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc/",
+            "file_name": "JD.pdf",
+            "saved_path": "/home/u/.linkedin-mcp/downloads/JD.pdf",
+            "size_bytes": 10240,
+            "size": "10 KB",
+            "sender": "Ana Lopes",
+            "sent_at": "9:05 AM",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "download_attachment")
+        result = await tool_fn(
+            "2-abc", "JD.pdf", mock_context, index=1, extractor=mock_extractor
+        )
+
+        assert result == expected
+        mock_extractor.download_attachment.assert_awaited_once_with(
+            thread_id="2-abc", file_name="JD.pdf", index=1
+        )
 
     async def test_search_conversations_success(self, mock_context):
         expected = {

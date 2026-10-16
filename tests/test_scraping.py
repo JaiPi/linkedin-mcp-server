@@ -40,10 +40,13 @@ from linkedin_mcp_server.scraping.extractor import (
     _CONVERSATION_ROWS_JS,
     _build_feed_references,
     _truncate_linkedin_noise,
+    conversation_attachments,
     conversation_participants,
     is_conversation_participant,
+    safe_attachment_filename,
     strip_conversation_chrome,
     strip_linkedin_noise,
+    unused_path,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
@@ -6568,6 +6571,112 @@ class TestIsConversationParticipant:
         )
 
 
+class TestConversationAttachments:
+    # The shape get_conversation returned live for an attachment, blank lines
+    # included.
+    THREAD = (
+        "SEP 30\n"
+        "Jaime Pignatelli sent the following messages at 6:36 PM\n"
+        "View Jaime’s profile\n"
+        "Jaime Pignatelli   6:36 PM\n"
+        "\n"
+        "parece-me bem :)\n"
+        "\n"
+        "View Jaime’s profile\n"
+        "Jaime Pignatelli   6:39 PM\n"
+        "\n"
+        "cv-jaime-pignatelli.pdf\n"
+        "\n"
+        "65 KB\n"
+        "\n"
+        "Download\n"
+        "\n"
+        "Vitor Duarte sent the following message at 7:45 PM\n"
+        "View Vitor’s profile\n"
+        "Vitor Duarte   7:45 PM\n"
+        "\n"
+        "JD.pdf\n"
+        "\n"
+        "1.2 MB\n"
+        "\n"
+        "Download\n"
+    )
+
+    def test_reads_name_size_sender_and_time(self):
+        assert conversation_attachments(self.THREAD) == [
+            {
+                "file_name": "cv-jaime-pignatelli.pdf",
+                "size": "65 KB",
+                "sender": "Jaime Pignatelli",
+                "sent_at": "6:39 PM",
+                "index": 0,
+            },
+            {
+                "file_name": "JD.pdf",
+                "size": "1.2 MB",
+                "sender": "Vitor Duarte",
+                "sent_at": "7:45 PM",
+                "index": 0,
+            },
+        ]
+
+    def test_resent_file_is_indexed_newest_first(self):
+        thread = (
+            "Ana Lopes   9:00 AM\nJD.pdf\n10 KB\nDownload\n"
+            "Ana Lopes   9:05 AM\nJD.pdf\n11 KB\nDownload"
+        )
+        found = conversation_attachments(thread)
+
+        assert [(a["size"], a["index"]) for a in found] == [
+            ("10 KB", 1),
+            ("11 KB", 0),
+        ]
+
+    def test_a_message_saying_download_is_not_an_attachment(self):
+        thread = "Ana Lopes   9:00 AM\nPlease see below\nDownload"
+        assert conversation_attachments(thread) == []
+
+    def test_sidebar_preview_is_not_an_attachment(self):
+        assert conversation_attachments("Peter sent an attachment") == []
+
+    def test_unknown_locale_returns_nothing(self):
+        assert conversation_attachments(self.THREAD, locale="de") == []
+
+
+class TestSafeAttachmentFilename:
+    def test_keeps_an_ordinary_name(self):
+        assert safe_attachment_filename("JD - Platform Engineer.pdf") == (
+            "JD - Platform Engineer.pdf"
+        )
+
+    def test_cannot_climb_out_of_the_directory(self):
+        name = safe_attachment_filename("../../etc/passwd")
+        assert "/" not in name
+        assert not name.startswith(".")
+
+    def test_drops_control_characters(self):
+        assert safe_attachment_filename("cv\x00\n.pdf") == "cv.pdf"
+
+    def test_empty_name_gets_a_fallback(self):
+        assert safe_attachment_filename(" .. ") == "attachment"
+
+    def test_long_name_is_capped_with_its_extension(self):
+        name = safe_attachment_filename("a" * 500 + ".docx")
+        assert name.endswith(".docx")
+        assert len(name) <= 130
+
+
+class TestUnusedPath:
+    def test_numbers_rather_than_overwrites(self, tmp_path):
+        (tmp_path / "JD.pdf").write_bytes(b"old")
+        (tmp_path / "JD (1).pdf").write_bytes(b"older")
+
+        assert unused_path(tmp_path, "JD.pdf") == tmp_path / "JD (2).pdf"
+
+    def test_free_name_is_used_as_is(self, tmp_path):
+        assert unused_path(tmp_path, "JD.pdf") == tmp_path / "JD.pdf"
+
+
 class TestActivityFeedExtraction:
     """Tests for activity page detection and wait behavior in _extract_page_once."""
 
@@ -8408,6 +8517,38 @@ class TestGetConversationParticipantThreads:
 
         assert "participant_threads" not in result
         assert result["sections"]["conversation"] == "Como estamos quanto à entrevista?"
+
+
+class TestDownloadAttachmentSelection:
+    async def test_unknown_file_lists_what_is_present(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        thread = "Ana Lopes   9:00 AM\nJD.pdf\n10 KB\nDownload"
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_read_opened_conversation",
+                new_callable=AsyncMock,
+                return_value=("raw", thread, []),
+            ),
+            pytest.raises(LinkedInScraperException, match=r"\['JD.pdf'\]"),
+        ):
+            await extractor.download_attachment("2-abc", "CV.pdf")
+
+    async def test_index_past_the_resends_is_refused(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        thread = "Ana Lopes   9:00 AM\nJD.pdf\n10 KB\nDownload"
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_read_opened_conversation",
+                new_callable=AsyncMock,
+                return_value=("raw", thread, []),
+            ),
+            pytest.raises(LinkedInScraperException, match="index 1"),
+        ):
+            await extractor.download_attachment("2-abc", "JD.pdf", index=1)
 
 
 class TestGetConversation:

@@ -112,6 +112,10 @@
       "description": "Read a specific messaging conversation by thread ID or LinkedIn username"
     },
     {
+      "name": "download_attachment",
+      "description": "Save a file attached to a LinkedIn conversation to the local downloads directory and return its path"
+    },
+    {
       "name": "search_conversations",
       "description": "Search LinkedIn messages by keyword"
     },

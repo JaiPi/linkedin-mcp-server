@@ -48,6 +48,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `get_unread_conversations` | List every unread conversation without marking any of them read |
 | `get_all_conversations` | List every conversation, read and unread, without marking any read |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID |
+| `download_attachment` | Save a file attached to a conversation (e.g. a job description) under `~/.linkedin-mcp/downloads` and return its path |
 | `search_conversations` | Search messages by keyword |
 | `send_message` | Compose/send a new message to a LinkedIn user (requires confirmation; profile-based targeting may open a separate DM instead of replying in an existing thread — see #483) |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet |

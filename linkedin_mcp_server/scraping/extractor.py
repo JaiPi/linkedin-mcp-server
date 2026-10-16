@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import html
 import json
 import logging
+import os
+from pathlib import Path
 import re
 import time
 from typing import TYPE_CHECKING, Any, Literal
@@ -31,6 +33,7 @@ from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
 )
+from linkedin_mcp_server.common_utils import secure_mkdir
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
@@ -61,6 +64,7 @@ from linkedin_mcp_server.scraping.link_metadata import (
     build_references,
     dedupe_references,
 )
+from linkedin_mcp_server.session_state import auth_root_dir
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
@@ -1967,6 +1971,15 @@ class _MessagingChromeTable:
     # "Jaime Pignatelli and Adrianna Hebisz"), while sidebar rows name only
     # the other person.
     participant_joiner: str
+    # An attachment renders as one button holding three lines: the file name,
+    # its size, and this label. Seen live as "cv-jaime-pignatelli.pdf" /
+    # "65 KB" / "Download".
+    attachment_download: str
+    # The size line of an attachment ("65 KB").
+    attachment_size: re.Pattern[str]
+    # A message group's sender line: the name, a run of spaces, the time
+    # ("Jaime Pignatelli   6:39 PM").
+    message_header: re.Pattern[str]
 
 
 # How far below a composer-label candidate a companion control may sit and
@@ -1985,6 +1998,11 @@ _MESSAGING_CHROME_STRINGS: dict[str, _MessagingChromeTable] = {
             "Open send options",
         ),
         participant_joiner=" and ",
+        attachment_download="Download",
+        attachment_size=re.compile(r"^\d+(?:[.,]\d+)?\s?(?:B|KB|MB|GB)$"),
+        message_header=re.compile(
+            r"^(?P<sender>\S.*?)\s{2,}(?P<time>\d{1,2}:\d{2}\s?[AP]M)$"
+        ),
     ),
 }
 
@@ -2052,6 +2070,85 @@ def is_conversation_participant(
         or listed.startswith(target + joiner)
         or listed.endswith(joiner + target)
     )
+
+
+def conversation_attachments(thread: str, locale: str = "en") -> list[dict[str, Any]]:
+    """The attachments in a cleaned thread, oldest first.
+
+    An attachment is the three-line block its button renders: file name, size,
+    then the download label, blank lines between. A message that merely says
+    "Download" has no size line above it and is not one.
+
+    Each entry carries ``index``, its rank among attachments of the same name,
+    newest first, so a re-sent "JD.pdf" can be picked out; ``sender`` and
+    ``sent_at`` come from the nearest message header above it, and are empty
+    when none is found.
+    """
+    table = _MESSAGING_CHROME_STRINGS.get(locale)
+    if table is None:
+        return []
+
+    lines = [line.strip() for line in thread.splitlines()]
+    lines = [line for line in lines if line]
+    found: list[dict[str, Any]] = []
+    sender = sent_at = ""
+    for i, line in enumerate(lines):
+        header = table.message_header.match(line)
+        if header:
+            sender, sent_at = header.group("sender"), header.group("time")
+            continue
+        if (
+            line == table.attachment_download
+            and i >= 2
+            and table.attachment_size.match(lines[i - 1])
+        ):
+            found.append(
+                {
+                    "file_name": lines[i - 2],
+                    "size": lines[i - 1],
+                    "sender": sender,
+                    "sent_at": sent_at,
+                }
+            )
+
+    seen: dict[str, int] = {}
+    for attachment in reversed(found):
+        name = attachment["file_name"]
+        attachment["index"] = seen.get(name, 0)
+        seen[name] = attachment["index"] + 1
+    return found
+
+
+# Longest saved file name, in characters, before the extension is re-attached.
+_MAX_ATTACHMENT_STEM = 120
+
+
+def safe_attachment_filename(name: str) -> str:
+    """A file name a stranger chose, made safe to create in a directory.
+
+    The name comes from whoever sent the attachment, so it is reduced to a
+    final path component with no separators or control characters, and
+    capped in length with its extension kept.
+    """
+    cleaned = "".join(ch for ch in name if ch.isprintable())
+    cleaned = cleaned.replace("/", "_").replace("\\", "_").strip(" .")
+    if not cleaned:
+        return "attachment"
+    stem, dot, extension = cleaned.rpartition(".")
+    if not dot or not stem:
+        return cleaned[:_MAX_ATTACHMENT_STEM]
+    return f"{stem[:_MAX_ATTACHMENT_STEM]}.{extension[:16]}"
+
+
+def unused_path(directory: Path, name: str) -> Path:
+    """``directory / name``, numbered "(1)", "(2)" ... rather than overwriting."""
+    candidate = directory / name
+    stem, suffix = candidate.stem, candidate.suffix
+    counter = 1
+    while candidate.exists():
+        candidate = directory / f"{stem} ({counter}){suffix}"
+        counter += 1
+    return candidate
 
 
 def _conversation_chrome_bounds(
@@ -6120,6 +6217,11 @@ class LinkedInExtractor:
         which covers the case that matters, since a fresh reply sorts to the
         top; a group thread's name may match no row; and two different people
         with one display name are reported too.
+
+        Attachments appear in the thread text as file name, size and a
+        download label, with no URL. They are also returned as
+        ``attachments`` (file_name, size, sender, sent_at, index) so that
+        ``download_attachment`` can be pointed at one.
         """
         if not linkedin_username and not thread_id:
             raise LinkedInScraperException(
@@ -6134,6 +6236,29 @@ class LinkedInExtractor:
                 linkedin_username or "", index=index
             )
 
+        raw, cleaned, raw_references = await self._read_opened_conversation()
+        references = build_references(raw_references, "conversation") if cleaned else []
+        result = self._single_section_result(
+            self._page.url,
+            "conversation",
+            cleaned,
+            references=references,
+        )
+        participant_threads = await self._participant_threads(raw)
+        if participant_threads:
+            result["participant_threads"] = participant_threads
+        attachments = conversation_attachments(cleaned)
+        if attachments:
+            result["attachments"] = attachments
+        return result
+
+    async def _read_opened_conversation(self) -> tuple[str, str, list[Any]]:
+        """Settle the thread page just navigated to and read it.
+
+        Returns the raw ``main`` text, the cleaned thread, and the raw anchor
+        references. Shared by `get_conversation` and `download_attachment`, so
+        the thread a download is chosen from is the thread a read shows.
+        """
         await detect_rate_limit(self._page)
         await self._wait_for_main_text(log_context="Conversation")
         await handle_modal_close(self._page)
@@ -6148,21 +6273,80 @@ class LinkedInExtractor:
         # markers are ever seen.
         cleaned = strip_conversation_chrome(raw) if raw else ""
         cleaned = strip_linkedin_noise(cleaned) if cleaned else ""
-        references = (
-            build_references(raw_result["references"], "conversation")
-            if cleaned
-            else []
+        return raw, cleaned, raw_result["references"]
+
+    async def download_attachment(
+        self, thread_id: str, file_name: str, index: int = 0
+    ) -> dict[str, Any]:
+        """Save one attachment from a thread to the local downloads directory.
+
+        The attachment is picked by its exact file name and, when the same
+        name was sent more than once, by ``index`` (0 is the newest). Its
+        button is clicked inside the existing session and the browser's own
+        download is saved, so no file URL is needed or exposed.
+
+        Files land in ``downloads/`` under the server's data directory
+        (``~/.linkedin-mcp`` by default, the directory Docker mounts), owner
+        read and write only. The sender chose the file name, so it is reduced
+        to a safe final component, and an existing file is never overwritten:
+        a numbered name is used instead.
+        """
+        file_name = file_name.strip()
+        thread_id = normalize_thread_id(thread_id)
+        await self._navigate_to_page(messaging_thread_url(thread_id, "/"))
+        _, cleaned, _ = await self._read_opened_conversation()
+
+        attachments = conversation_attachments(cleaned)
+        same_name = [a for a in attachments if a["file_name"] == file_name]
+        chosen = next((a for a in same_name if a["index"] == index), None)
+        if chosen is None:
+            present = sorted({a["file_name"] for a in attachments})
+            raise LinkedInScraperException(
+                f"No attachment {file_name!r} with index {index} in this thread. "
+                f"Attachments present: {present or 'none'}."
+            )
+
+        # The thread renders oldest first, and index counts newest first.
+        position = len(same_name) - 1 - index
+        table = _MESSAGING_CHROME_STRINGS["en"]
+        buttons = (
+            self._page.locator("main button")
+            .filter(has=self._page.get_by_text(file_name, exact=True))
+            .filter(has=self._page.get_by_text(table.attachment_download, exact=True))
         )
-        result = self._single_section_result(
-            self._page.url,
-            "conversation",
-            cleaned,
-            references=references,
+        found = await buttons.count()
+        if found != len(same_name):
+            raise LinkedInScraperException(
+                f"Found {found} download controls for {len(same_name)} attachments "
+                f"named {file_name!r}, so which one to click is not certain."
+            )
+
+        directory = auth_root_dir() / "downloads"
+        secure_mkdir(directory)
+        try:
+            async with self._page.expect_download(timeout=30000) as download_info:
+                await buttons.nth(position).click()
+            download = await download_info.value
+        except PlaywrightTimeoutError as exc:
+            raise LinkedInScraperException(
+                f"LinkedIn did not start the download of {file_name!r}."
+            ) from exc
+
+        target = unused_path(
+            directory,
+            safe_attachment_filename(download.suggested_filename or file_name),
         )
-        participant_threads = await self._participant_threads(raw)
-        if participant_threads:
-            result["participant_threads"] = participant_threads
-        return result
+        await download.save_as(target)
+        os.chmod(target, 0o600)
+        return {
+            "url": self._page.url,
+            "file_name": file_name,
+            "saved_path": str(target),
+            "size_bytes": target.stat().st_size,
+            "size": chosen["size"],
+            "sender": chosen["sender"],
+            "sent_at": chosen["sent_at"],
+        }
 
     async def _participant_threads(self, raw: str) -> list[dict[str, Any]]:
         """Sidebar rows sharing the opened thread's participant, if 2 or more.

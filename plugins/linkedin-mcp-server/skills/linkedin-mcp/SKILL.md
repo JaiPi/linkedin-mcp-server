@@ -46,7 +46,8 @@ instances, clear profiles, or replace the user's browser session.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`. These
   click-visit sidebar rows to recover thread IDs, which marks those rows read;
   `get_unread_conversations` and `get_all_conversations` read the same listings
-  without clicking, returning no thread IDs.
+  without clicking, returning no thread IDs. `download_attachment` saves a
+  file listed in `get_conversation`'s `attachments`, such as a job description.
 - Writes: `send_message` and `connect_with_person`, subject to the explicit
   authorization rules above.
 - Cleanup: use `close_session` only when the user asks to end the managed

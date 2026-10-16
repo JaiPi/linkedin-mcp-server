@@ -146,6 +146,8 @@ Optional additional keys:
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
 - `unread_conversations: [{name, timestamp, snippet, unread}, ...]` (get_unread_conversations only) — in inbox order. No thread id: the sidebar carries none in the DOM and recovering one means click-visiting the row, which marks it read and is what that tool exists to avoid.
 - `all_conversations: [{name, timestamp, snippet, unread}, ...]` (get_all_conversations only) — every conversation read and unread, same no-click read and same absence of thread ids. `unread` is the conversation card's own state and is **advisory**: measured on a 190-row inbox it flagged 13 where `?filter=unread` reported 30, so `get_unread_conversations` is the authoritative unread set.
+- `participant_threads: [{timestamp, snippet, unread}, ...]` (get_conversation only) — present when the inbox sidebar shows more than one conversation with the thread's participant, in sidebar order. A saved thread id can miss a reply that landed in another thread; this is how the caller sees it. Read without clicking.
+- `attachments: [{file_name, size, sender, sent_at, index}, ...]` (get_conversation only) — files sent in the thread, oldest first, parsed from the thread text. `index` ranks same-named files newest first; pass `file_name` and `index` to `download_attachment`.
 - `references["feed"]` (get_feed only) — every entry is `kind: "feed_post"`; non-post anchors (sidebar profiles, employer logos) are filtered. URLs may carry either `/feed/update/<urn>/` (DOM-anchor-derived) or `/posts/<slug>` (SDUI-derived) form; both are valid LinkedIn permalinks. Cap is 50 entries, matching `get_feed`'s `num_posts` ceiling.
 
 ## Tests

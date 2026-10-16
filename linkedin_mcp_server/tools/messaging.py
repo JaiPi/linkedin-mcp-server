@@ -259,8 +259,10 @@ def register_messaging_tools(
 
         Returns:
             Dict with url, sections (conversation -> raw text), optional
-            references, and participant_threads when the participant has more
-            than one conversation.
+            references, participant_threads when the participant has more
+            than one conversation, and attachments (file_name, size, sender,
+            sent_at, index) when files were sent; save one with
+            download_attachment.
         """
         if not linkedin_username and not thread_id:
             raise_tool_error(
@@ -302,6 +304,75 @@ def register_messaging_tools(
                 raise_tool_error(relogin_exc, "get_conversation")
         except Exception as e:
             raise_tool_error(e, "get_conversation")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Download Attachment",
+        # Not read-only: it opens the thread, which marks it read, and it writes
+        # a file. It never overwrites one, so it is not destructive either.
+        annotations={"openWorldHint": True},
+        tags={"messaging", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def download_attachment(
+        thread_id: str,
+        file_name: str,
+        ctx: Context,
+        index: Annotated[int, Field(ge=0)] = 0,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        Save a file attached to a LinkedIn conversation and return its local path.
+
+        Recruiters often send the job description as a PDF or .docx, and it
+        tends to hold the rate, hours and contract type. get_conversation lists
+        a thread's attachments under `attachments`; pass one's file_name here,
+        and its index when the same name was sent more than once (0 = newest).
+
+        The file is saved under downloads/ in the server's data directory
+        (~/.linkedin-mcp by default), readable by the owner only, and never
+        overwrites an existing file. Converting it to text, e.g. a .docx, is
+        left to the caller. Opening the thread marks it read.
+
+        Args:
+            thread_id: LinkedIn messaging thread ID, as get_conversation returns in its url
+            file_name: Exact attachment file name from get_conversation's attachments
+            ctx: FastMCP context for progress reporting
+            index: Which same-named attachment to save, 0 = newest
+
+        Returns:
+            Dict with url, file_name, saved_path, size_bytes, size, sender and sent_at.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="download_attachment"
+            )
+            logger.info(
+                "Downloading attachment: thread_id=%s, file_name=%s, index=%d",
+                thread_id,
+                file_name,
+                index,
+            )
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Opening conversation"
+            )
+
+            result = await extractor.download_attachment(
+                thread_id=thread_id, file_name=file_name, index=index
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "download_attachment")
+        except Exception as e:
+            raise_tool_error(e, "download_attachment")  # NoReturn
 
     @mcp.tool(
         timeout=tool_timeout,
