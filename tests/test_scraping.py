@@ -7988,6 +7988,102 @@ class TestExtractProfileUrn:
 
         assert result is None
 
+    @pytest.mark.parametrize(
+        ("payload", "reason"),
+        [
+            ("not a dict", "bad_payload"),
+            (
+                {"status": "unavailable", "pageUrl": "https://example.com/in/x/"},
+                "unavailable_bad_page_url",
+            ),
+            (
+                {
+                    "status": "unresolved",
+                    "reason": "multiple_active_anchors",
+                    "pageUrl": "https://www.linkedin.com/in/testuser/",
+                    "diag": {"activeAnchors": 2},
+                },
+                "multiple_active_anchors",
+            ),
+            ({"status": "unresolved", "reason": "Not A Reason!"}, "unresolved"),
+            ({"status": "unresolved"}, "unresolved"),
+            (
+                {"status": "resolved", "pageUrl": 1, "composeHrefs": []},
+                "bad_payload",
+            ),
+            (
+                {
+                    "status": "resolved",
+                    "pageUrl": "https://www.linkedin.com/in/testuser/?locale=de",
+                    "composeHrefs": ["/messaging/compose/?recipient=ACoAAB"],
+                },
+                "profile_path_rejected",
+            ),
+            (
+                {
+                    "status": "resolved",
+                    "pageUrl": "https://www.linkedin.com/in/testuser/",
+                    "composeHrefs": [],
+                },
+                "compose_href_count",
+            ),
+            (
+                {
+                    "status": "resolved",
+                    "pageUrl": "https://www.linkedin.com/in/testuser/",
+                    "composeHrefs": ["http://www.linkedin.com/messaging/compose/"],
+                },
+                "unsafe_compose_href",
+            ),
+            (
+                {
+                    "status": "resolved",
+                    "pageUrl": "https://www.linkedin.com/in/testuser/",
+                    "composeHrefs": ["/messaging/compose/"],
+                },
+                "no_profile_urn",
+            ),
+        ],
+    )
+    async def test_failure_names_its_check(self, mock_page, caplog, payload, reason):
+        mock_page.evaluate = AsyncMock(return_value=payload)
+
+        with caplog.at_level("DEBUG", logger=extractor_module.logger.name):
+            resolution = await LinkedInExtractor(
+                mock_page
+            )._read_profile_message_target()
+
+        assert resolution.status == "failed"
+        assert resolution.reason == reason
+        assert f"Profile Message action unresolved: reason={reason} " in caplog.text
+
+    async def test_evaluate_error_names_its_check(self, mock_page, caplog):
+        mock_page.evaluate = AsyncMock(side_effect=RuntimeError("detached"))
+
+        with caplog.at_level("DEBUG", logger=extractor_module.logger.name):
+            resolution = await LinkedInExtractor(
+                mock_page
+            )._read_profile_message_target()
+
+        assert resolution.reason == "evaluate_error"
+        assert "reason=evaluate_error" in caplog.text
+
+    async def test_diag_reaches_the_log(self, mock_page, caplog):
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "status": "unresolved",
+                "reason": "inactive_duplicate",
+                "pageUrl": "https://www.linkedin.com/in/testuser/",
+                "diag": {"hrefs": ["/messaging/compose/?recipient=ACoAAB"]},
+            }
+        )
+
+        with caplog.at_level("DEBUG", logger=extractor_module.logger.name):
+            await LinkedInExtractor(mock_page)._read_profile_message_target()
+
+        assert "page=https://www.linkedin.com/in/testuser/" in caplog.text
+        assert "/messaging/compose/?recipient=ACoAAB" in caplog.text
+
 
 class TestScrapePersonProfileUrn:
     async def test_includes_profile_urn_in_result_when_found(self, mock_page):
@@ -9249,7 +9345,9 @@ class TestSendMessage:
                 extractor,
                 "_read_profile_message_target",
                 new_callable=AsyncMock,
-                return_value=extractor_module._ProfileMessageTargetResolution("failed"),
+                return_value=extractor_module._ProfileMessageTargetResolution(
+                    "failed", reason="inactive_duplicate"
+                ),
             ),
         ):
             result = await extractor.send_message(
@@ -9257,6 +9355,7 @@ class TestSendMessage:
             )
 
         assert result["status"] == "recipient_resolution_failed"
+        assert result["reason"] == "inactive_duplicate"
         assert "connect_with_person" not in result["message"]
         assert result["retry_safe"] is True
 

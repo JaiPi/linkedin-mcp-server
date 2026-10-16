@@ -485,7 +485,10 @@ def register_messaging_tools(
             where the outcome is unknown. ``retry_safe`` separates the two: it
             is false from the moment a submission is attempted, and calling
             again while it is
-            false can deliver the message twice.
+            false can deliver the message twice. A
+            ``recipient_resolution_failed`` result from reading the profile's
+            Message action also carries ``reason``, naming the check that
+            refused it (for example ``multiple_active_anchors``).
         """
         try:
             # Answered before a session is acquired. Caller-owned message
