@@ -241,6 +241,13 @@ def register_messaging_tools(
         path. Each visit selects the row in the LinkedIn UI and may mark it
         as read. Pass thread_id directly to skip this enumeration.
 
+        A person can have several conversations, and a saved thread_id may not
+        hold their newest reply. When the inbox shows more than one
+        conversation under this thread's participant name, the result carries
+        participant_threads: one entry (timestamp, snippet, unread) per
+        conversation, newest first. If one of them is newer than this thread,
+        the reply is there: open it with linkedin_username and index.
+
         Args:
             ctx: FastMCP context for progress reporting
             linkedin_username: LinkedIn username of the conversation participant; a full profile URL is accepted too
@@ -251,7 +258,9 @@ def register_messaging_tools(
                 thread IDs first, call search_conversations.
 
         Returns:
-            Dict with url, sections (conversation -> raw text), and optional references.
+            Dict with url, sections (conversation -> raw text), optional
+            references, and participant_threads when the participant has more
+            than one conversation.
         """
         if not linkedin_username and not thread_id:
             raise_tool_error(

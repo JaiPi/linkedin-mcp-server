@@ -1086,6 +1086,32 @@ class TestMessagingTools:
             linkedin_username="testuser", thread_id=None, index=0
         )
 
+    async def test_get_conversation_passes_participant_threads_through(
+        self, mock_context
+    ):
+        threads = [
+            {"timestamp": "11:00 AM", "snippet": "Vitor: Vamos", "unread": True},
+            {"timestamp": "Oct 14", "snippet": "EPAM Systems", "unread": False},
+        ]
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/abc123/",
+            "sections": {"conversation": "Como estamos?"},
+            "participant_threads": threads,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_conversation")
+        result = await tool_fn(
+            mock_context, thread_id="abc123", extractor=mock_extractor
+        )
+
+        assert result["participant_threads"] == threads
+
     async def test_search_conversations_success(self, mock_context):
         expected = {
             "url": "https://www.linkedin.com/messaging/",

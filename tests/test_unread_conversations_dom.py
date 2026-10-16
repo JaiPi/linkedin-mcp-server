@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from patchright.async_api import async_playwright
@@ -29,6 +30,7 @@ from linkedin_mcp_server.core.utils import scroll_conversation_list
 from linkedin_mcp_server.scraping.extractor import (
     _CONVERSATION_ROWS_JS,
     _UNREAD_CARD_CLASS,
+    LinkedInExtractor,
 )
 
 #: CI uses ``--dist loadgroup``. Keep every test that launches Chromium on one
@@ -245,6 +247,81 @@ async def test_survives_a_batch_slower_than_the_last(page):
 
     assert raised is False
     assert len(await read_rows(page)) == 35
+
+
+def named_row(name: str, timestamp: str, snippet: str) -> str:
+    return (
+        '<li class="ember-view msg-conversation-listitem">'
+        '<div class="msg-conversation-card">'
+        f'<label aria-label="Select conversation with {name}"></label>'
+        f"<time>{timestamp}</time>"
+        f'<p class="msg-conversation-card__message-snippet">{snippet}</p>'
+        "</div></li>"
+    )
+
+
+THREAD_PAGE = f"""
+<!doctype html>
+<html><body>
+<main>
+  <ul>
+    {named_row("Vitor Duarte", "11:00 AM", "Vitor: Vamos retomar o processo")}
+    {named_row("Someone Else", "10:30 AM", "Someone: Unrelated")}
+    {named_row("Vitor Duarte", "Oct 14", "EPAM Systems Portugal :)")}
+  </ul>
+  <p>Load more conversations</p>
+  <p>Open the options list in your conversation with Vitor Duarte and Jaime Pignatelli</p>
+  <p>Vitor Duarte sent the following message at 9:00 AM</p>
+  <p>Conta para a semana com o next step</p>
+  <p>Jaime Pignatelli sent the following message at 10:52 AM</p>
+  <p>Como estamos quanto à entrevista?</p>
+  <p>Maximize compose field</p>
+  <p>Open GIF Keyboard</p>
+  <p>Open send options</p>
+</main>
+</body></html>
+"""
+
+
+async def test_get_conversation_lists_the_participants_other_thread(page):
+    """The 2026-10-15 case: the reply sat in a second thread with Vitor.
+
+    The opened thread is the old one, complete and plausible on its own; the
+    sidebar on the same page is the only place the newer thread shows.
+    """
+    extractor = LinkedInExtractor(page)
+
+    async def load(_url: str) -> None:
+        await page.set_content(THREAD_PAGE)
+
+    with (
+        patch.object(extractor, "_navigate_to_page", AsyncMock(side_effect=load)),
+        patch(
+            "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+            new_callable=AsyncMock,
+        ),
+    ):
+        result = await extractor.get_conversation(thread_id="2-abc")
+
+    assert result["participant_threads"] == [
+        {
+            "timestamp": "11:00 AM",
+            "snippet": "Vitor: Vamos retomar o processo",
+            "unread": False,
+        },
+        {
+            "timestamp": "Oct 14",
+            "snippet": "EPAM Systems Portugal :)",
+            "unread": False,
+        },
+    ]
+    conversation = result["sections"]["conversation"]
+    assert conversation.endswith("Como estamos quanto à entrevista?")
+    assert "Vamos retomar" not in conversation
 
 
 async def test_stops_on_a_list_that_never_grows(page):

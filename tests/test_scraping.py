@@ -40,6 +40,8 @@ from linkedin_mcp_server.scraping.extractor import (
     _CONVERSATION_ROWS_JS,
     _build_feed_references,
     _truncate_linkedin_noise,
+    conversation_participants,
+    is_conversation_participant,
     strip_conversation_chrome,
     strip_linkedin_noise,
 )
@@ -6504,6 +6506,68 @@ class TestStripConversationChrome:
         assert strip_conversation_chrome("") == ""
 
 
+class TestConversationParticipants:
+    PAGE = TestStripConversationChrome.PAGE
+
+    def test_reads_the_opened_threads_header_not_a_sidebar_row(self):
+        # The sidebar carries its own options line for Ada and Grace; the
+        # thread's header is the first one after the sidebar's last line.
+        assert conversation_participants(self.PAGE) == "Grace Hopper and Ada Lovelace"
+
+    def test_without_sidebar_end_uses_last_header_before_composer(self):
+        text = self.PAGE.replace("Load more conversations\n", "")
+        assert conversation_participants(text) == "Grace Hopper and Ada Lovelace"
+
+    def test_unknown_locale_returns_none(self):
+        assert conversation_participants(self.PAGE, locale="de") is None
+
+    def test_no_header_returns_none(self):
+        assert conversation_participants("Hello!\nHi there!") is None
+
+
+class TestIsConversationParticipant:
+    """Live 1:1 headers name both sides, in either order; rows name one."""
+
+    def test_other_person_listed_first(self):
+        assert is_conversation_participant(
+            "Vitor Duarte", "Vitor Duarte and Jaime Pignatelli"
+        )
+
+    def test_other_person_listed_last(self):
+        assert is_conversation_participant(
+            "Adrianna Hebisz", "Jaime Pignatelli and Adrianna Hebisz"
+        )
+
+    def test_case_and_whitespace_are_ignored(self):
+        assert is_conversation_participant(
+            " vitor duarte ", "Vitor Duarte and Jaime Pignatelli"
+        )
+
+    def test_name_with_commas_is_not_split(self):
+        assert is_conversation_participant(
+            "Philipp A. Effenberger, PCC, SAC",
+            "Jaime Pignatelli and Philipp A. Effenberger, PCC, SAC",
+        )
+
+    def test_a_name_that_only_prefixes_a_participant_does_not_match(self):
+        assert not is_conversation_participant(
+            "Vitor", "Vitor Duarte and Jaime Pignatelli"
+        )
+        assert not is_conversation_participant(
+            "Ana", "Jaime Pignatelli and Ana Marques"
+        )
+
+    def test_someone_else_does_not_match(self):
+        assert not is_conversation_participant(
+            "Rama Devi Bhumireddy", "Vitor Duarte and Jaime Pignatelli"
+        )
+
+    def test_unknown_locale_matches_nothing(self):
+        assert not is_conversation_participant(
+            "Vitor Duarte", "Vitor Duarte and Jaime Pignatelli", locale="de"
+        )
+
+
 class TestActivityFeedExtraction:
     """Tests for activity page detection and wait behavior in _extract_page_once."""
 
@@ -8248,6 +8312,102 @@ class TestGetInbox:
         assert refs[0]["kind"] == "conversation"
         assert refs[0]["url"] == "/messaging/thread/2-abc123/"
         assert refs[0]["text"] == "Tony Chan"
+
+
+class TestGetConversationParticipantThreads:
+    """The rows reported when a participant has more than one conversation."""
+
+    RAW = (
+        "Vitor Duarte\n"
+        "11:00 AM\n"
+        "Vitor: Vamos retomar o processo\n"
+        "Load more conversations\n"
+        # The live header names both sides of a 1:1, the owner included.
+        "Open the options list in your conversation with "
+        "Vitor Duarte and Jaime Pignatelli\n"
+        "Como estamos quanto à entrevista?\n"
+        "Maximize compose field\n"
+        "Open send options"
+    )
+
+    @staticmethod
+    def row(name: str, timestamp: str, snippet: str, unread: bool = False):
+        return {
+            "name": name,
+            "timestamp": timestamp,
+            "snippet": snippet,
+            "unread": unread,
+        }
+
+    async def read(self, mock_page, rows=None, rows_error=None):
+        extractor = LinkedInExtractor(mock_page)
+        rows_mock = AsyncMock(return_value=rows or [], side_effect=rows_error)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": self.RAW, "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+            patch.object(extractor, "_conversation_row_entries", rows_mock),
+        ):
+            return await extractor.get_conversation(thread_id="abc123")
+
+    async def test_lists_every_row_for_the_participant_in_sidebar_order(
+        self, mock_page
+    ):
+        rows = [
+            self.row("Vitor Duarte", "11:00 AM", "Vitor: Vamos retomar", unread=True),
+            self.row("Someone Else", "10:00 AM", "Hi"),
+            self.row("vitor duarte", "Oct 14", "EPAM Systems Portugal :)"),
+        ]
+        result = await self.read(mock_page, rows)
+
+        assert result["participant_threads"] == [
+            {
+                "timestamp": "11:00 AM",
+                "snippet": "Vitor: Vamos retomar",
+                "unread": True,
+            },
+            {
+                "timestamp": "Oct 14",
+                "snippet": "EPAM Systems Portugal :)",
+                "unread": False,
+            },
+        ]
+        assert result["sections"]["conversation"] == "Como estamos quanto à entrevista?"
+
+    async def test_single_thread_adds_nothing(self, mock_page):
+        rows = [
+            self.row("Vitor Duarte", "Oct 14", "EPAM Systems Portugal :)"),
+            self.row("Someone Else", "10:00 AM", "Hi"),
+        ]
+        result = await self.read(mock_page, rows)
+
+        assert "participant_threads" not in result
+
+    async def test_unreadable_sidebar_still_returns_the_thread(self, mock_page):
+        result = await self.read(mock_page, rows_error=RuntimeError("detached"))
+
+        assert "participant_threads" not in result
+        assert result["sections"]["conversation"] == "Como estamos quanto à entrevista?"
 
 
 class TestGetConversation:

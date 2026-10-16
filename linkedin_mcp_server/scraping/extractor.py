@@ -1962,6 +1962,11 @@ class _MessagingChromeTable:
     # excluded: they would need prefix matching, and any prefix match lets
     # quoted control text with a suffix confirm a false boundary.
     composer_companions: tuple[str, ...]
+    # Joins the names in a thread header's participant list. Live 1:1 headers
+    # name both sides in either order ("Vitor Duarte and Jaime Pignatelli",
+    # "Jaime Pignatelli and Adrianna Hebisz"), while sidebar rows name only
+    # the other person.
+    participant_joiner: str
 
 
 # How far below a composer-label candidate a companion control may sit and
@@ -1979,6 +1984,7 @@ _MESSAGING_CHROME_STRINGS: dict[str, _MessagingChromeTable] = {
             "Open Emoji Keyboard",
             "Open send options",
         ),
+        participant_joiner=" and ",
     ),
 }
 
@@ -1999,7 +2005,59 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
         return text
 
     lines = text.splitlines()
+    start, end, _ = _conversation_chrome_bounds(lines, table)
+    return "\n".join(lines[start:end]).strip()
 
+
+def conversation_participants(text: str, locale: str = "en") -> str | None:
+    """The participant list in an opened thread's header, or None.
+
+    The header line is the screen-reader label on the thread's options
+    dropdown ("Open the options list in your conversation with Vitor Duarte
+    and Jaime Pignatelli"), located by the same boundary search as
+    `strip_conversation_chrome`. A locale without a chrome table, or a page
+    with no header line, yields None: a caller cannot tell whose thread this
+    is, rather than being told the wrong name.
+    """
+    table = _MESSAGING_CHROME_STRINGS.get(locale)
+    if table is None:
+        return None
+
+    lines = text.splitlines()
+    _, _, header = _conversation_chrome_bounds(lines, table)
+    if header is None:
+        return None
+    participants = lines[header].strip()[len(table.thread_header_prefix) :].strip()
+    return participants or None
+
+
+def is_conversation_participant(
+    name: str, participants: str, locale: str = "en"
+) -> bool:
+    """Whether a sidebar row's name is one end of a header's participant list.
+
+    Matched as the whole list or as its first or last name, never by
+    splitting: display names carry commas ("Philipp A. Effenberger, PCC,
+    SAC"), so a split would cut a name apart. A name in the middle of a group
+    list is not matched, which costs only a group thread's report.
+    """
+    table = _MESSAGING_CHROME_STRINGS.get(locale)
+    target = name.strip().lower()
+    listed = participants.strip().lower()
+    if not target or table is None:
+        return False
+    joiner = table.participant_joiner.lower()
+    return (
+        listed == target
+        or listed.startswith(target + joiner)
+        or listed.endswith(joiner + target)
+    )
+
+
+def _conversation_chrome_bounds(
+    lines: list[str], table: _MessagingChromeTable
+) -> tuple[int, int, int | None]:
+    """Thread start, thread end, and the thread-header line index if found."""
     # End boundary: the last composer-label line, accepted only when an
     # exact companion control follows within the next few lines. The real
     # composer block is contiguous (label + controls observed within 6
@@ -2025,6 +2083,7 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     # sidebar omits the pagination control when there are few conversations —
     # then fall back to the last options line before the composer.
     start = 0
+    header: int | None = None
     sidebar_end = next(
         (i for i in range(end) if lines[i].strip() == table.sidebar_end), None
     )
@@ -2041,10 +2100,11 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     else:
         for i in range(end - 1, -1, -1):
             if lines[i].strip().startswith(table.thread_header_prefix):
+                header = i
                 start = i + 1
                 break
 
-    return "\n".join(lines[start:end]).strip()
+    return start, end, header
 
 
 class LinkedInExtractor:
@@ -5810,21 +5870,7 @@ class LinkedInExtractor:
         # row is reported as zero conversations rather than raised.
         await scroll_conversation_list(self._page)
 
-        raw_rows: list[dict[str, Any]] = await self._page.evaluate(
-            _CONVERSATION_ROWS_JS, {"unreadClass": _UNREAD_CARD_CLASS}
-        )
-
-        conversations: list[dict[str, Any]] = []
-        for row in raw_rows:
-            name = self._strip_select_conversation_prefix(row.get("ariaLabel", ""))
-            conversations.append(
-                {
-                    "name": name,
-                    "timestamp": row.get("timestamp", ""),
-                    "snippet": row.get("snippet", ""),
-                    "unread": bool(row.get("unread")),
-                }
-            )
+        conversations = await self._conversation_row_entries()
 
         unread_count = sum(1 for c in conversations if c["unread"])
         logger.info(
@@ -5846,6 +5892,28 @@ class LinkedInExtractor:
         result = self._single_section_result(url, section, text)
         result[section] = conversations
         return result
+
+    async def _conversation_row_entries(self) -> list[dict[str, Any]]:
+        """The conversation rows the sidebar has rendered, read without a click.
+
+        Reads whatever is loaded now and scrolls nothing: the listing tools
+        scroll first, `get_conversation` reads the window a thread page already
+        shows.
+        """
+        raw_rows: list[dict[str, Any]] = await self._page.evaluate(
+            _CONVERSATION_ROWS_JS, {"unreadClass": _UNREAD_CARD_CLASS}
+        )
+        return [
+            {
+                "name": self._strip_select_conversation_prefix(
+                    row.get("ariaLabel", "")
+                ),
+                "timestamp": row.get("timestamp", ""),
+                "snippet": row.get("snippet", ""),
+                "unread": bool(row.get("unread")),
+            }
+            for row in raw_rows
+        ]
 
     async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
@@ -6041,6 +6109,17 @@ class LinkedInExtractor:
         thread-id attributes exist in the sidebar). Each visit selects the row
         in the LinkedIn UI and may mark it as read. Pass ``thread_id`` directly
         to skip this enumeration.
+
+        A participant's newest reply can sit in a different thread from the one
+        opened: a thread ID saved earlier stays valid when the person later
+        writes in a second conversation, and the old thread then reads as
+        complete. So when the inbox sidebar on the same page shows more than one
+        row under the thread's participant name, every such row is returned as
+        ``participant_threads`` (timestamp, snippet, unread), in sidebar order.
+        Nothing is clicked. Only rows the sidebar has already loaded are seen,
+        which covers the case that matters, since a fresh reply sorts to the
+        top; a group thread's name may match no row; and two different people
+        with one display name are reported too.
         """
         if not linkedin_username and not thread_id:
             raise LinkedInScraperException(
@@ -6074,12 +6153,41 @@ class LinkedInExtractor:
             if cleaned
             else []
         )
-        return self._single_section_result(
+        result = self._single_section_result(
             self._page.url,
             "conversation",
             cleaned,
             references=references,
         )
+        participant_threads = await self._participant_threads(raw)
+        if participant_threads:
+            result["participant_threads"] = participant_threads
+        return result
+
+    async def _participant_threads(self, raw: str) -> list[dict[str, Any]]:
+        """Sidebar rows sharing the opened thread's participant, if 2 or more.
+
+        Best effort by design: the thread text is the answer, and failing to
+        add context to it must not fail the read.
+        """
+        participants = conversation_participants(raw) if raw else None
+        if not participants:
+            return []
+        try:
+            rows = await self._conversation_row_entries()
+        except Exception as exc:
+            logger.debug("Could not read sidebar rows for %s: %s", participants, exc)
+            return []
+        matches = [
+            {
+                "timestamp": row["timestamp"],
+                "snippet": row["snippet"],
+                "unread": row["unread"],
+            }
+            for row in rows
+            if is_conversation_participant(row["name"], participants)
+        ]
+        return matches if len(matches) > 1 else []
 
     async def search_conversations(
         self, keywords: str, limit: int = 20
